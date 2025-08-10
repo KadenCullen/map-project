@@ -1,0 +1,30 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta http-equiv="Content-Style-Type" content="text/css">
+  <title></title>
+  <meta name="Generator" content="Cocoa HTML Writer">
+  <meta name="CocoaVersion" content="2487.7">
+  <style type="text/css">
+    p.p1 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Times; -webkit-text-stroke: #000000}
+    span.s1 {font-kerning: none}
+  </style>
+</head>
+<body>
+<p class="p1"><span class="s1">{</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">  </span>"id": "valdez-001",</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">  </span>"panel_size_mm": [563.0, 482.0],</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">  </span>"map_size_mm": [435.0, 432.0],</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">  </span>"map_offset_in_panel_mm": [26.0, 86.0],</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">  </span>"apriltags": [</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">    </span>{ "id": 101, "center_xy_mm": [-10.4,<span class="Apple-converted-space">  </span>-73.9],<span class="Apple-converted-space">  </span>"size_mm": 30.0, "rpy_deg": [0, 0, 0] },</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">    </span>{ "id": 102, "center_xy_mm": [225.0,<span class="Apple-converted-space">  </span>-14.7],<span class="Apple-converted-space">  </span>"size_mm": 30.0, "rpy_deg": [0, 0, 0] },</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">    </span>{ "id": 103, "center_xy_mm": [446.8,<span class="Apple-converted-space">  </span>-73.1],<span class="Apple-converted-space">  </span>"size_mm": 30.0, "rpy_deg": [0, 0, 0] },</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">    </span>{ "id": 104, "center_xy_mm": [-10.16, 463.85], "size_mm": 30.0, "rpy_deg": [0, 0, 0] },</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">    </span>{ "id": 105, "center_xy_mm": [446.8,<span class="Apple-converted-space">  </span>463.85], "size_mm": 30.0, "rpy_deg": [0, 0, 0] }</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">  </span>],</span></p>
+<p class="p1"><span class="s1"><span class="Apple-converted-space">  </span>"hotspots": []</span></p>
+<p class="p1"><span class="s1">}</span></p>
+</body>
+</html>
