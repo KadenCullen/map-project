@@ -33,154 +33,129 @@
 <script src="https://unpkg.com/comlink/dist/umd/comlink.js"></script>
 
 <script type="module">
-/* ----------- global error bubble ----------- */
 addEventListener('error', e => { const m=`JS error: ${e.message}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
 addEventListener('unhandledrejection', e => { const m=`Promise error: ${e.reason?.message ?? e.reason}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
 
-/* ----------- config/paths ----------- */
+/* ----------- config / paths ----------- */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
-const CFG_URL = `/data/${id}.json?v=7`;   // cache-bust
+const CFG_URL = `/data/${id}.json?v=8`;  // cache-bust
+const APRILTAG_WORKER_URL = '/vendor/apriltag/apriltag.js';
+const APRILTAG_WASM_JS    = '/vendor/apriltag/apriltag_wasm.js';
+const APRILTAG_WASM_BIN   = '/vendor/apriltag/apriltag_wasm.wasm';
 
-const APRILTAG_WORKER_URL = '/vendor/apriltag/apriltag.js';       // worker entry (uses importScripts)
-const APRILTAG_WASM_JS    = '/vendor/apriltag/apriltag_wasm.js';  // must exist next to the worker
-const APRILTAG_WASM_BIN   = '/vendor/apriltag/apriltag_wasm.wasm';// served as application/wasm
-
-/* ----------- DOM helpers ----------- */
 const $ = s => document.querySelector(s);
 const statsEl = $('#stats'), msgEl = $('#msg'), pinsEl = $('#pins');
 const cam = $('#cam'), work = $('#work'); const wctx = work.getContext('2d', { willReadFrequently: true });
 
-/* ----------- robust JSON loader ----------- */
 async function loadJSON(url){
-  const r = await fetch(url,{cache:'no-store'}); if(!r.ok) throw new Error(`Config HTTP ${r.status}`);
+  const r = await fetch(url, {cache:'no-store'}); if(!r.ok) throw new Error(`Config HTTP ${r.status}`);
   const txt = await r.text();
-  const clean = txt.replace(/^\uFEFF/,'').replace(/^\s*\/\/.*$/mg,'');
-  return JSON.parse(clean);
+  return JSON.parse(txt.replace(/^\uFEFF/,'').replace(/^\s*\/\/.*$/mg,''));
 }
 
-/* ----------- grayscale ----------- */
+/* ---------- grayscale ---------- */
 function toGray(rgba,w,h){
   const g = new Uint8Array(w*h);
-  for(let i=0,j=0;j<g.length;i+=4,j++){
-    g[j] = (0.299*rgba[i] + 0.587*rgba[i+1] + 0.114*rgba[i+2])|0;
-  }
+  for(let i=0,j=0;j<g.length;i+=4,j++) g[j]=(0.299*rgba[i]+0.587*rgba[i+1]+0.114*rgba[i+2])|0;
   return g;
 }
 
-/* ----------- worker-based detector ----------- */
+/* ---------- worker-based detector ---------- */
 async function loadAprilTag(){
-  // quick existence check for the glue/wasm; helps surface path issues early
-  await Promise.all([
-    fetch(APRILTAG_WASM_JS, {cache:'no-store'}),
-    fetch(APRILTAG_WASM_BIN, {cache:'no-store'})
-  ]).then(rs => rs.forEach(r => { if(!r.ok) throw new Error(`Missing: ${r.url}`); }));
-
+  await Promise.all([APRILTAG_WASM_JS, APRILTAG_WASM_BIN].map(p=>fetch(p,{cache:'no-store'}).then(r=>{if(!r.ok) throw new Error(`Missing: ${p}`);})));
   const worker = new Worker(APRILTAG_WORKER_URL, { type: 'classic' });
   const RemoteApriltag = Comlink.wrap(worker);
-
-  // The worker constructor expects a "ready" callback; pass via Comlink.
   let readyResolve; const ready = new Promise(r => (readyResolve = r));
   const detector = await new RemoteApriltag(Comlink.proxy(() => readyResolve()));
-  await ready; // wait for WASM initialize inside the worker
-  return detector; // proxy; methods are async
+  await ready;
+  // disable pose (we’re 2D homography only) & allow unlimited detections
+  await detector.set_return_pose(0);
+  await detector.set_max_detections(0);
+  return detector; // methods are async across worker
 }
 
-/* ----------- homography math ----------- */
+/* ---------- homography math ---------- */
 function computeHomography(world,image){
   const A=[], b=[];
-  for(let i=0;i<world.length;i++){
-    const [X,Y]=world[i],[u,v]=image[i];
-    A.push([X,Y,1, 0,0,0, -u*X,-u*Y]); b.push(u);
-    A.push([0,0,0, X,Y,1, -v*X,-v*Y]); b.push(v);
+  for(let i=0;i<world.length;i++){ const [X,Y]=world[i],[u,v]=image[i];
+    A.push([X,Y,1,0,0,0,-u*X,-u*Y]); b.push(u);
+    A.push([0,0,0,X,Y,1,-v*X,-v*Y]); b.push(v);
   }
-  const n=8, m=A.length;
-  const AtA=Array.from({length:n},()=>new Float64Array(n));
-  const Atb=new Float64Array(n);
+  const n=8, m=A.length, AtA=Array.from({length:n},()=>new Float64Array(n)), Atb=new Float64Array(n);
   for(let r=0;r<m;r++){ const R=A[r], br=b[r]; for(let i=0;i<n;i++){ Atb[i]+=R[i]*br; for(let j=0;j<n;j++) AtA[i][j]+=R[i]*R[j]; } }
-  function choleskySolve(A,b){
-    const n=A.length, L=Array.from({length:n},()=>new Float64Array(n));
+  function chol(A,b){ const n=A.length,L=Array.from({length:n},()=>new Float64Array(n));
     for(let i=0;i<n;i++){ for(let j=0;j<=i;j++){ let s=A[i][j]; for(let k=0;k<j;k++) s-=L[i][k]*L[j][k]; L[i][j]=(i===j)?Math.sqrt(Math.max(s,1e-12)):s/L[j][j]; } }
     const y=new Float64Array(n); for(let i=0;i<n;i++){ let s=b[i]; for(let k=0;k<i;k++) s-=L[i][k]*y[k]; y[i]=s/L[i][i]; }
-    const x=new Float64Array(n); for(let i=n-1;i>=0;i--){ let s=y[i]; for(let k=i+1;k<n;k++) s-=L[k][i]*x[k]; x[i]=s/L[i][i]; }
-    return x;
-  }
-  const h8 = choleskySolve(AtA, Atb);
-  return new Float64Array([h8[0],h8[1],h8[2], h8[3],h8[4],h8[5], h8[6],h8[7], 1]);
+    const x=new Float64Array(n); for(let i=n-1;i>=0;i--){ let s=y[i]; for(let k=i+1;k<n;k++) s-=L[k][i]*x[k]; x[i]=s/L[i][i]; } return x; }
+  const h=chol(AtA,Atb); return new Float64Array([h[0],h[1],h[2], h[3],h[4],h[5], h[6],h[7], 1]);
 }
 const applyH=(H,X,Y)=>{const u=H[0]*X+H[1]*Y+H[2], v=H[3]*X+H[4]*Y+H[5], w=H[6]*X+H[7]*Y+H[8]; return [u/w,v/w];};
 const smooth=(p,n,a=0.25)=>!p?n:[p[0]*(1-a)+n[0]*a, p[1]*(1-a)+n[1]*a];
 
-/* ----------- detection shape adapters ----------- */
-const getId = d => d.id ?? d.tag_id ?? d.tagId ?? d.code;
-const getCorners = d => {
-  if (d.corners) return d.corners;                       // [[u,v],...]
-  if (d.c) return d.c;                                   // [[u,v],...]
-  if (d.lb && d.lt && d.rt && d.rb) return [d.lt,d.rt,d.rb,d.lb].map(p=>[p.x??p[0], p.y??p[1]]);
-  if (d.p) return d.p.map(p=>[p.x??p[0], p.y??p[1]]);
+/* ---------- normalize worker detections ---------- */
+function normalizeDetections(d){
+  if (!d) return [];
+  if (typeof d === 'string') { try { d = JSON.parse(d); } catch {} }
+  if (Array.isArray(d)) return d;
+  for (const k of ['result','results','detections','tags']) {
+    if (Array.isArray(d[k])) return d[k];
+  }
+  // last resort: if it’s an object of objects -> values
+  if (typeof d === 'object') return Object.values(d);
+  return [];
+}
+const getId = det => det.id ?? det.tag_id ?? det.tagId ?? det.code ?? det.i;
+const getCorners = det => {
+  if (det.corners) return det.corners;       // [[u,v]x4]
+  if (det.c) return det.c;                   // [[u,v]x4]
+  if (det.p) return det.p.map(p => [p.x??p[0], p.y??p[1]]);
+  if (det.lb && det.lt && det.rt && det.rb)  // objects with x,y or [x,y]
+    return [det.lt,det.rt,det.rb,det.lb].map(p => [p.x??p[0], p.y??p[1]]);
   return null;
 };
 
-/* ----------- main ----------- */
-let cfg, detector, stream, track;
+/* ---------- main ---------- */
+let cfg, detector, stream, track, debugShown=false;
 const tagWorld=[], tagImage=[];
 let H=null;
 const pinEls=new Map(), pinSmoothed=new Map();
-const DETECT_W=640, K_MIN=4;
+const K_MIN=4;
 
-function updateStats(n){ statsEl.textContent = `${n} tag${n===1?'':'s'}`; }
+function updateStats(n){ statsEl.textContent=`${n} tag${n===1?'':'s'}`; }
 function logError(e){ const m=(e && (e.stack||e.message)) || String(e); msgEl.textContent=m; console.error(e); }
 
 async function init(){
   cfg = await loadJSON(CFG_URL);
-
   detector = await loadAprilTag();
-  await detector.set_return_pose(0);       // <— add
-  await detector.set_max_detections(0);   
+
   // Camera
   stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: {ideal:'environment'} } });
-  cam.srcObject = stream; await cam.play();
-  track = stream.getVideoTracks?.()[0];
+  cam.srcObject = stream; await cam.play(); track = stream.getVideoTracks?.()[0];
 
   // Torch (best effort)
-  try {
-    const caps = track?.getCapabilities?.();
-    if (caps?.torch) {
-      const btn = document.getElementById('torch');
-      btn.hidden = false;
-      btn.onclick = async () => {
-        const st = track.getSettings?.() || {};
-        await track.applyConstraints({ advanced: [{ torch: !st.torch }]});
-      };
-    }
-  } catch {}
+  try { const caps = track?.getCapabilities?.(); if (caps?.torch) { const b=document.getElementById('torch'); b.hidden=false; b.onclick=async ()=>{ const st=track.getSettings?.()||{}; await track.applyConstraints({advanced:[{torch:!st.torch}]}); }; } } catch {}
 
- // Downscale canvas for detection (cap at 1280 wide)
-  const vw = cam.videoWidth, vh = cam.videoHeight;
-  const target = Math.min(1280, vw);   // try 960 if 1280 is slow
-  const sc = target / vw;
-  work.width  = Math.round(vw * sc);
-  work.height = Math.round(vh * sc);
+  // Detection canvas: feed the worker plenty of pixels (cap ~1280 wide)
+  const vw=cam.videoWidth, vh=cam.videoHeight, target=Math.min(1280, vw), sc=target/vw;
+  work.width=Math.round(vw*sc); work.height=Math.round(vh*sc);
 
-  // Pin DOMs
-  for (const h of (cfg.hotspots||[])){
-    const el=document.createElement('div'); el.className='pin';
-    if (h.img){ const im=document.createElement('img'); im.src=h.img; el.appendChild(im); }
+  // Pins
+  for(const h of (cfg.hotspots||[])){ const el=document.createElement('div'); el.className='pin';
+    if(h.img){ const im=document.createElement('img'); im.src=h.img; el.appendChild(im); }
     const cap=document.createElement('span'); cap.textContent=h.label||''; el.appendChild(cap);
-    pinsEl.appendChild(el); pinEls.set(h,el);
-  }
+    pinsEl.appendChild(el); pinEls.set(h,el); }
 
   msgEl.textContent='Aim so 3–4 tags are visible';
   requestAnimationFrame(loop);
 }
 
-function gather(dets,sx,sy){
-  tagWorld.length = 0; tagImage.length = 0;
-  const lut = new Map(cfg.apriltags.map(t => [t.id, t]));
-  for (const d of dets){
-    const id = getId(d); const t = lut.get(id); if (!t) continue;
-    const corners = getCorners(d); if (!corners || corners.length!==4) continue;
-
+function gather(list,sx,sy){
+  tagWorld.length=0; tagImage.length=0;
+  const lut=new Map(cfg.apriltags.map(t=>[t.id,t]));
+  for(const d of list){
+    const id=getId(d); const t=lut.get(id); const corners=getCorners(d);
+    if(!t || !corners || corners.length!==4) continue;
     const s=t.size_mm/2, wx=t.center_xy_mm[0], wy=t.center_xy_mm[1];
     const world=[[wx-s,wy+s],[wx+s,wy+s],[wx+s,wy-s],[wx-s,wy-s]];
     const image=corners.map(([u,v])=>[u/sx, v/sy]);
@@ -204,21 +179,29 @@ function layoutPins(){
 async function loop(){
   try{
     wctx.drawImage(cam,0,0,work.width,work.height);
-    const frame = wctx.getImageData(0,0,work.width,work.height);
-    const gray = toGray(frame.data, work.width, work.height);
-    const dets = await detector.detect(gray, work.width, work.height); // worker -> returns Promise
+    const frame=wctx.getImageData(0,0,work.width,work.height);
+    const gray=toGray(frame.data, work.width, work.height);
+    let dets=await detector.detect(gray, work.width, work.height);
+
+    const list=normalizeDetections(dets);
+    if (!debugShown && list.length){
+      const keys = Object.keys(list[0]||{});
+      msgEl.textContent = `seen tag-like object · keys: ${keys.join(', ')}`;
+      debugShown = true;
+      setTimeout(()=>{ msgEl.textContent=''; }, 1200);
+    }
 
     const sx=cam.videoWidth/work.width, sy=cam.videoHeight/work.height;
-    gather(dets, sx, sy);
+    gather(list, sx, sy);
 
-    if(tagWorld.length >= K_MIN){
-      H = computeHomography(tagWorld, tagImage);
-      msgEl.textContent = '';
+    if(tagWorld.length>=K_MIN){
+      H=computeHomography(tagWorld, tagImage);
+      msgEl.textContent='';
       layoutPins();
-      updateStats(dets.length);
+      updateStats(list.length);
     } else {
-      msgEl.textContent = 'Move closer until 3–4 tags are visible';
-      updateStats(dets.length);
+      msgEl.textContent='Move closer until 3–4 tags are visible';
+      updateStats(list.length);
     }
   } catch(e){ logError(e); }
   requestAnimationFrame(loop);
