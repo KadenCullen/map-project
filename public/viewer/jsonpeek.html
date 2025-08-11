@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>json peek</title>
+<pre id="out">loading…</pre>
+<script>
+(async () => {
+  const url = new URLSearchParams(location.search).get('u')
+    || '/data/valdez-001.json?v=3';
+  const r = await fetch(url,{cache:'no-store'});
+  const txt = await r.text();
+  const head = txt.slice(0,200).replace(/[\r\n]/g,'⏎');
+  const codes = Array.from(head).map(c=>c.charCodeAt(0)).join(',');
+  document.getElementById('out').textContent =
+    `status ${r.status}\nfirst 200 chars:\n${head}\n\nchar codes:\n[${codes}]`;
+  try { JSON.parse(txt.replace(/^\uFEFF/,'').replace(/^\s*\/\/.*$/mg,'')); 
+        document.getElementById('out').textContent += `\n\n✅ JSON.parse OK`; }
+  catch(e){ document.getElementById('out').textContent += `\n\n💥 parse error: ${e.message}`; }
+})();
+</script>
