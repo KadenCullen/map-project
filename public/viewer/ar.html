@@ -177,13 +177,25 @@ async function init(){
   const vw=cam.videoWidth, vh=cam.videoHeight, target=Math.min(1280, vw), sc=target/vw;
   work.width=Math.round(vw*sc); work.height=Math.round(vh*sc);
 
-  // Pins
-  for (const h of cfg.hotspots){
-    const el=document.createElement('div'); el.className='pin';
-    const cap=document.createElement('span'); cap.textContent=h.label||''; el.appendChild(cap);
-    pinsEl.appendChild(el); pinEls.set(h,el);
+ // Pins
+for (const h of cfg.hotspots){
+  const el=document.createElement('div'); el.className='pin';
+  
+  // ADD THIS: Create image if present
+  if (h.img) {
+    const img = document.createElement('img');
+    img.src = h.img;
+    img.style.maxWidth = '160px';
+    img.style.maxHeight = '100px';
+    img.style.borderRadius = '8px';
+    img.style.marginBottom = '4px';
+    img.style.display = 'block';
+    el.appendChild(img);
   }
-
+  
+  const cap=document.createElement('span'); cap.textContent=h.label||''; el.appendChild(cap);
+  pinsEl.appendChild(el); pinEls.set(h,el);
+}
   msgEl.textContent='Aim so 3–4 tags are visible';
   requestAnimationFrame(loop);
 }
