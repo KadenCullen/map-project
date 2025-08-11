@@ -33,54 +33,65 @@
 <script src="https://unpkg.com/comlink/dist/umd/comlink.js"></script>
 
 <script type="module">
+/* ----------- global error bubble ----------- */
 addEventListener('error', e => { const m=`JS error: ${e.message}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
 addEventListener('unhandledrejection', e => { const m=`Promise error: ${e.reason?.message ?? e.reason}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
 
 /* ----------- config / paths ----------- */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
-const CFG_URL = `/data/${id}.json?v=8`;  // cache-bust
+const CFG_URL = `/data/${id}.json?v=9`;  // cache-bust while iterating
+
+// Your worker-style build that calls importScripts(...)
 const APRILTAG_WORKER_URL = '/vendor/apriltag/apriltag.js';
 const APRILTAG_WASM_JS    = '/vendor/apriltag/apriltag_wasm.js';
 const APRILTAG_WASM_BIN   = '/vendor/apriltag/apriltag_wasm.wasm';
 
+/* ----------- DOM helpers ----------- */
 const $ = s => document.querySelector(s);
 const statsEl = $('#stats'), msgEl = $('#msg'), pinsEl = $('#pins');
-const cam = $('#cam'), work = $('#work'); const wctx = work.getContext('2d', { willReadFrequently: true });
+const cam = $('#cam'), work = $('#work');
+const wctx = work.getContext('2d', { willReadFrequently: true });
 
+/* ----------- robust JSON loader ----------- */
 async function loadJSON(url){
-  const r = await fetch(url, {cache:'no-store'}); if(!r.ok) throw new Error(`Config HTTP ${r.status}`);
+  const r = await fetch(url,{cache:'no-store'});
+  if(!r.ok) throw new Error(`Config HTTP ${r.status}`);
   const txt = await r.text();
   return JSON.parse(txt.replace(/^\uFEFF/,'').replace(/^\s*\/\/.*$/mg,''));
 }
 
-/* ---------- grayscale ---------- */
+/* ----------- grayscale ----------- */
 function toGray(rgba,w,h){
   const g = new Uint8Array(w*h);
   for(let i=0,j=0;j<g.length;i+=4,j++) g[j]=(0.299*rgba[i]+0.587*rgba[i+1]+0.114*rgba[i+2])|0;
   return g;
 }
 
-/* ---------- worker-based detector ---------- */
+/* ----------- worker-based detector ----------- */
 async function loadAprilTag(){
-  await Promise.all([APRILTAG_WASM_JS, APRILTAG_WASM_BIN].map(p=>fetch(p,{cache:'no-store'}).then(r=>{if(!r.ok) throw new Error(`Missing: ${p}`);})));
-  const worker = new Worker(APRILTAG_WORKER_URL, { type: 'classic' });
+  // surface missing files early
+  await Promise.all([APRILTAG_WASM_JS, APRILTAG_WASM_BIN].map(p =>
+    fetch(p,{cache:'no-store'}).then(r => { if(!r.ok) throw new Error(`Missing: ${p}`); })
+  ));
+  const worker = new Worker(APRILTAG_WORKER_URL, { type: 'classic' }); // worker itself importScripts the wasm glue
   const RemoteApriltag = Comlink.wrap(worker);
   let readyResolve; const ready = new Promise(r => (readyResolve = r));
   const detector = await new RemoteApriltag(Comlink.proxy(() => readyResolve()));
   await ready;
-  // disable pose (we’re 2D homography only) & allow unlimited detections
+  // 2D use only; don’t request pose
   await detector.set_return_pose(0);
   await detector.set_max_detections(0);
-  return detector; // methods are async across worker
+  return detector; // methods are async
 }
 
-/* ---------- homography math ---------- */
+/* ----------- homography math ----------- */
 function computeHomography(world,image){
   const A=[], b=[];
-  for(let i=0;i<world.length;i++){ const [X,Y]=world[i],[u,v]=image[i];
-    A.push([X,Y,1,0,0,0,-u*X,-u*Y]); b.push(u);
-    A.push([0,0,0,X,Y,1,-v*X,-v*Y]); b.push(v);
+  for(let i=0;i<world.length;i++){
+    const [X,Y]=world[i],[u,v]=image[i];
+    A.push([X,Y,1, 0,0,0, -u*X,-u*Y]); b.push(u);
+    A.push([0,0,0, X,Y,1, -v*X,-v*Y]); b.push(v);
   }
   const n=8, m=A.length, AtA=Array.from({length:n},()=>new Float64Array(n)), Atb=new Float64Array(n);
   for(let r=0;r<m;r++){ const R=A[r], br=b[r]; for(let i=0;i<n;i++){ Atb[i]+=R[i]*br; for(let j=0;j<n;j++) AtA[i][j]+=R[i]*R[j]; } }
@@ -88,12 +99,13 @@ function computeHomography(world,image){
     for(let i=0;i<n;i++){ for(let j=0;j<=i;j++){ let s=A[i][j]; for(let k=0;k<j;k++) s-=L[i][k]*L[j][k]; L[i][j]=(i===j)?Math.sqrt(Math.max(s,1e-12)):s/L[j][j]; } }
     const y=new Float64Array(n); for(let i=0;i<n;i++){ let s=b[i]; for(let k=0;k<i;k++) s-=L[i][k]*y[k]; y[i]=s/L[i][i]; }
     const x=new Float64Array(n); for(let i=n-1;i>=0;i--){ let s=y[i]; for(let k=i+1;k<n;k++) s-=L[k][i]*x[k]; x[i]=s/L[i][i]; } return x; }
-  const h=chol(AtA,Atb); return new Float64Array([h[0],h[1],h[2], h[3],h[4],h[5], h[6],h[7], 1]);
+  const h=chol(AtA,Atb);
+  return new Float64Array([h[0],h[1],h[2], h[3],h[4],h[5], h[6],h[7], 1]);
 }
 const applyH=(H,X,Y)=>{const u=H[0]*X+H[1]*Y+H[2], v=H[3]*X+H[4]*Y+H[5], w=H[6]*X+H[7]*Y+H[8]; return [u/w,v/w];};
 const smooth=(p,n,a=0.25)=>!p?n:[p[0]*(1-a)+n[0]*a, p[1]*(1-a)+n[1]*a];
 
-/* ---------- normalize worker detections ---------- */
+/* ----------- detection normalization ----------- */
 function normalizeDetections(d){
   if (!d) return [];
   if (typeof d === 'string') { try { d = JSON.parse(d); } catch {} }
@@ -101,28 +113,49 @@ function normalizeDetections(d){
   for (const k of ['result','results','detections','tags']) {
     if (Array.isArray(d[k])) return d[k];
   }
-  // last resort: if it’s an object of objects -> values
   if (typeof d === 'object') return Object.values(d);
   return [];
 }
 const getId = det => det.id ?? det.tag_id ?? det.tagId ?? det.code ?? det.i;
-const getCorners = det => {
-  if (det.corners) return det.corners;       // [[u,v]x4]
-  if (det.c) return det.c;                   // [[u,v]x4]
-  if (det.p) return det.p.map(p => [p.x??p[0], p.y??p[1]]);
-  if (det.lb && det.lt && det.rt && det.rb)  // objects with x,y or [x,y]
-    return [det.lt,det.rt,det.rb,det.lb].map(p => [p.x??p[0], p.y??p[1]]);
-  return null;
-};
 
-/* ---------- main ---------- */
+/* robust corner extraction -> always [[u,v],[u,v],[u,v],[u,v]] or null */
+function getCorners(det){
+  let c = null;
+  if (det.corners) c = det.corners;
+  else if (det.c) c = det.c;
+  else if (det.p) c = det.p;
+  else if (det.lb && det.lt && det.rt && det.rb) c = [det.lt, det.rt, det.rb, det.lb];
+  else if (det.tl && det.tr && det.br && det.bl) c = [det.tl, det.tr, det.br, det.bl];
+  else if (det.points) c = det.points;
+  else if (det.corner || det.corner_pts) c = det.corner || det.corner_pts;
+  // object with numeric keys "0".."3"
+  if (!c && typeof det === 'object' && det['0'] && det['3']) c = [det['0'], det['1'], det['2'], det['3']];
+  // flat 8-number array -> pair it up
+  if (Array.isArray(c) && c.length === 8 && typeof c[0] === 'number') {
+    c = [[c[0],c[1]],[c[2],c[3]],[c[4],c[5]],[c[6],c[7]]];
+  }
+  // values-object -> to array
+  if (!Array.isArray(c) && typeof c === 'object') c = Object.values(c);
+  // normalize each to [u,v]
+  if (Array.isArray(c) && c.length >= 4) {
+    const pts = c.slice(0,4).map(p => {
+      if (Array.isArray(p)) return [Number(p[0]), Number(p[1])];
+      if (p && typeof p === 'object') return [Number(p.x ?? p.u ?? p[0]), Number(p.y ?? p.v ?? p[1])];
+      return [NaN, NaN];
+    });
+    if (pts.every(q => Number.isFinite(q[0]) && Number.isFinite(q[1]))) return pts;
+  }
+  return null;
+}
+
+/* ----------- main ----------- */
 let cfg, detector, stream, track, debugShown=false;
 const tagWorld=[], tagImage=[];
 let H=null;
 const pinEls=new Map(), pinSmoothed=new Map();
 const K_MIN=4;
 
-function updateStats(n){ statsEl.textContent=`${n} tag${n===1?'':'s'}`; }
+function updateStats(n){ statsEl.textContent = `${n} tag${n===1?'':'s'}`; }
 function logError(e){ const m=(e && (e.stack||e.message)) || String(e); msgEl.textContent=m; console.error(e); }
 
 async function init(){
@@ -131,20 +164,33 @@ async function init(){
 
   // Camera
   stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: {ideal:'environment'} } });
-  cam.srcObject = stream; await cam.play(); track = stream.getVideoTracks?.()[0];
+  cam.srcObject = stream; await cam.play();
+  track = stream.getVideoTracks?.()[0];
 
   // Torch (best effort)
-  try { const caps = track?.getCapabilities?.(); if (caps?.torch) { const b=document.getElementById('torch'); b.hidden=false; b.onclick=async ()=>{ const st=track.getSettings?.()||{}; await track.applyConstraints({advanced:[{torch:!st.torch}]}); }; } } catch {}
+  try {
+    const caps = track?.getCapabilities?.();
+    if (caps?.torch) {
+      const btn = document.getElementById('torch');
+      btn.hidden = false;
+      btn.onclick = async () => {
+        const st = track.getSettings?.() || {};
+        await track.applyConstraints({ advanced: [{ torch: !st.torch }]});
+      };
+    }
+  } catch {}
 
-  // Detection canvas: feed the worker plenty of pixels (cap ~1280 wide)
+  // Give detector plenty of pixels (cap ~1280 wide)
   const vw=cam.videoWidth, vh=cam.videoHeight, target=Math.min(1280, vw), sc=target/vw;
   work.width=Math.round(vw*sc); work.height=Math.round(vh*sc);
 
   // Pins
-  for(const h of (cfg.hotspots||[])){ const el=document.createElement('div'); el.className='pin';
-    if(h.img){ const im=document.createElement('img'); im.src=h.img; el.appendChild(im); }
+  for (const h of (cfg.hotspots||[])){
+    const el=document.createElement('div'); el.className='pin';
+    if (h.img){ const im=document.createElement('img'); im.src=h.img; el.appendChild(im); }
     const cap=document.createElement('span'); cap.textContent=h.label||''; el.appendChild(cap);
-    pinsEl.appendChild(el); pinEls.set(h,el); }
+    pinsEl.appendChild(el); pinEls.set(h,el);
+  }
 
   msgEl.textContent='Aim so 3–4 tags are visible';
   requestAnimationFrame(loop);
@@ -153,9 +199,17 @@ async function init(){
 function gather(list,sx,sy){
   tagWorld.length=0; tagImage.length=0;
   const lut=new Map(cfg.apriltags.map(t=>[t.id,t]));
-  for(const d of list){
+  for (const d of normalizeDetections(list)) {
     const id=getId(d); const t=lut.get(id); const corners=getCorners(d);
-    if(!t || !corners || corners.length!==4) continue;
+    if (!t || !corners) continue;
+
+    if (!debugShown) {
+      const keys = Object.keys(d || {});
+      msgEl.textContent = `seen id ${id} · keys: ${keys.join(', ')}`;
+      setTimeout(()=>{ msgEl.textContent=''; }, 1000);
+      debugShown = true;
+    }
+
     const s=t.size_mm/2, wx=t.center_xy_mm[0], wy=t.center_xy_mm[1];
     const world=[[wx-s,wy+s],[wx+s,wy+s],[wx+s,wy-s],[wx-s,wy-s]];
     const image=corners.map(([u,v])=>[u/sx, v/sy]);
@@ -181,27 +235,19 @@ async function loop(){
     wctx.drawImage(cam,0,0,work.width,work.height);
     const frame=wctx.getImageData(0,0,work.width,work.height);
     const gray=toGray(frame.data, work.width, work.height);
-    let dets=await detector.detect(gray, work.width, work.height);
-
-    const list=normalizeDetections(dets);
-    if (!debugShown && list.length){
-      const keys = Object.keys(list[0]||{});
-      msgEl.textContent = `seen tag-like object · keys: ${keys.join(', ')}`;
-      debugShown = true;
-      setTimeout(()=>{ msgEl.textContent=''; }, 1200);
-    }
+    const dets=await detector.detect(gray, work.width, work.height); // worker returns Promise
 
     const sx=cam.videoWidth/work.width, sy=cam.videoHeight/work.height;
-    gather(list, sx, sy);
+    gather(dets, sx, sy);
 
     if(tagWorld.length>=K_MIN){
       H=computeHomography(tagWorld, tagImage);
       msgEl.textContent='';
       layoutPins();
-      updateStats(list.length);
+      updateStats(normalizeDetections(dets).length);
     } else {
       msgEl.textContent='Move closer until 3–4 tags are visible';
-      updateStats(list.length);
+      updateStats(normalizeDetections(dets).length);
     }
   } catch(e){ logError(e); }
   requestAnimationFrame(loop);
