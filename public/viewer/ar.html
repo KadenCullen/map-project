@@ -233,7 +233,7 @@ function layoutPins(){
   for(const h of cfg.hotspots){
     const el=pinEls.get(h); if(!el) continue;
     const [u,v]=applyH(H,h.xy_mm[0],h.xy_mm[1]);
-    const sm=smooth(pinSmoothed.get(h),[u,v],0.25);
+    const sm=smooth(pinSmoothed.get(h),[u,v],0.05);
     pinSmoothed.set(h,sm);
     el.style.left=`${(sm[0]/vw)*100}vw`;
     el.style.top =`${(sm[1]/vh)*100}vh`;
