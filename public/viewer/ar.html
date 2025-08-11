@@ -135,7 +135,8 @@ async function init(){
   cfg = await loadJSON(CFG_URL);
 
   detector = await loadAprilTag();
-
+  await detector.set_return_pose(0);       // <— add
+  await detector.set_max_detections(0);   
   // Camera
   stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: {ideal:'environment'} } });
   cam.srcObject = stream; await cam.play();
@@ -154,9 +155,12 @@ async function init(){
     }
   } catch {}
 
-  // Downscale canvas for detection
-  const vw = cam.videoWidth, vh = cam.videoHeight, sc = DETECT_W / vw;
-  work.width = DETECT_W; work.height = Math.round(vh * sc);
+ // Downscale canvas for detection (cap at 1280 wide)
+  const vw = cam.videoWidth, vh = cam.videoHeight;
+  const target = Math.min(1280, vw);   // try 960 if 1280 is slow
+  const sc = target / vw;
+  work.width  = Math.round(vw * sc);
+  work.height = Math.round(vh * sc);
 
   // Pin DOMs
   for (const h of (cfg.hotspots||[])){
