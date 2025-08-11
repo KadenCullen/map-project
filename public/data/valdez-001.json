@@ -4,11 +4,12 @@
   "map_size_mm": [435, 432],
   "map_offset_in_panel_mm": [26, 86],
   "apriltags": [
-    { "id": 101, "center_xy_mm": [-10.4, -73.9],  "size_mm": 30, "rpy_deg": [0, 0, 0] },
-    { "id": 102, "center_xy_mm": [225,   -14.7],  "size_mm": 30, "rpy_deg": [0, 0, 0] },
-    { "id": 103, "center_xy_mm": [446.8, -73.1],  "size_mm": 30, "rpy_deg": [0, 0, 0] },
-    { "id": 104, "center_xy_mm": [-10.16, 463.85], "size_mm": 30, "rpy_deg": [0, 0, 0] },
-    { "id": 105, "center_xy_mm": [446.8, 463.85],  "size_mm": 30, "rpy_deg": [0, 0, 0] }
+ "apriltags": [
+    { "id": 101, "center_xy_mm": [50,   -20], "size_mm": 30, "rpy_deg": [0, 0, 0] },
+    { "id": 102, "center_xy_mm": [130,  -20], "size_mm": 30, "rpy_deg": [0, 0, 0] },
+    { "id": 103, "center_xy_mm": [210,  -20], "size_mm": 30, "rpy_deg": [0, 0, 0] },
+    { "id": 104, "center_xy_mm": [290,  -20], "size_mm": 30, "rpy_deg": [0, 0, 0] },
+    { "id": 105, "center_xy_mm": [370,  -20], "size_mm": 30, "rpy_deg": [0, 0, 0] }
   ],
   "hotspots": []
 }
