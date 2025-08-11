@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>AR diag</title>
+<style>body{font:14px system-ui;background:#0b0d10;color:#e7eaee} pre{white-space:pre-wrap}</style>
+<h1>AR diagnostics</h1>
+<pre id="log">starting…</pre>
+<script type="module">
+const log = (...a)=>{ const el=document.getElementById('log'); el.textContent += "\n" + a.join(" "); console.log(...a); };
+
+const CFG_URL = new URL('../data/valdez-001.json', location).toString();
+const APRILTAG_JS   = '/vendor/apriltag/apriltag.js';
+const APRILTAG_WASM = '/vendor/apriltag/apriltag_wasm.wasm';
+
+(async () => {
+  log('1) fetch config:', CFG_URL);
+  const cfgRes = await fetch(CFG_URL, {cache:'no-store'});
+  log('   status', cfgRes.status);
+  const cfg = await cfgRes.json();
+  log('   hotspots', (cfg.hotspots||[]).length, 'tags', (cfg.apriltags||[]).length);
+
+  log('2) fetch+compile WASM:', APRILTAG_WASM);
+  const wasmRes = await fetch(APRILTAG_WASM);
+  log('   status', wasmRes.status, 'content-type', wasmRes.headers.get('content-type'));
+  const wasmBuf = await wasmRes.arrayBuffer();
+  await WebAssembly.compile(wasmBuf);
+  log('   wasm OK');
+
+  log('3) dynamic import JS:', APRILTAG_JS);
+  const mod = await import(APRILTAG_JS);
+  log('   import OK; exports:', Object.keys(mod));
+  const factory = mod.default || mod.createModule || mod.Module || mod;
+  log('   factory typeof =', typeof factory);
+
+  log('4) camera getUserMedia…');
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+  stream.getTracks()[0].stop();
+  log('   camera OK');
+
+  log('\n✅ All diagnostics passed. If ar.html still errors, the issue is in viewer logic, not files/hosting.');
+})().catch(e => {
+  log('💥 ERROR:', e && e.message ? e.message : e);
+  if (e && e.stack) log(e.stack);
+});
+</script>
