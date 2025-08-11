@@ -9,7 +9,7 @@
   html,body{margin:0;height:100%;background:#0b0d10;color:#e7eaee;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
   #hud{position:fixed;inset:0;pointer-events:none}
   #stats{position:fixed;left:10px;bottom:10px;background:#1118;padding:8px 10px;border:1px solid #1b2028;border-radius:10px;font-size:12px}
-  #msg{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#1118;padding:8px 10px;border:1px solid #1b2028;border-radius:10px;font-size:12px;max-width:92vw}
+  #msg{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#1118;padding:8px 10px;border:1px solid #1b2028;border-radius:10px;font-size:12px;max-width:92vw;white-space:pre-wrap}
   #pins{position:absolute;inset:0;pointer-events:none}
   .pin{position:absolute;transform:translate(-50%,-100%);padding:4px 6px;border-radius:10px;border:1px solid #1b2028;background:#141a22cc;backdrop-filter:blur(3px);pointer-events:auto}
   .pin img{display:block;max-width:160px;max-height:100px;border-radius:8px;margin-bottom:4px}
@@ -29,137 +29,107 @@
 </div>
 <button id="torch" hidden>Torch</button>
 
-<script type="module">
+<!-- Comlink for worker RPC -->
+<script src="https://unpkg.com/comlink/dist/umd/comlink.js"></script>
 
-window.addEventListener('error', e => {
-  const m = `JS error: ${e.message}`;
-  const msg = document.getElementById('msg'); if (msg) msg.textContent = m;
-  console.error(e);
-});
-window.addEventListener('unhandledrejection', e => {
-  const m = `Promise error: ${e.reason && e.reason.message ? e.reason.message : e.reason}`;
-  const msg = document.getElementById('msg'); if (msg) msg.textContent = m;
-  console.error(e);
-});
-});
-  
-/* ---------- paths ---------- */
+<script type="module">
+/* ----------- global error bubble ----------- */
+addEventListener('error', e => { const m=`JS error: ${e.message}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
+addEventListener('unhandledrejection', e => { const m=`Promise error: ${e.reason?.message ?? e.reason}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
+
+/* ----------- config/paths ----------- */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
-const CFG_URL = `/data/${id}.json?v=5`;
+const CFG_URL = `/data/${id}.json?v=7`;   // cache-bust
 
-// Make sure these match your file locations
-const APRILTAG_JS   = '/vendor/apriltag/apriltag.js';
-const APRILTAG_WASM = '/vendor/apriltag/apriltag_wasm.wasm';
+const APRILTAG_WORKER_URL = '/vendor/apriltag/apriltag.js';       // worker entry (uses importScripts)
+const APRILTAG_WASM_JS    = '/vendor/apriltag/apriltag_wasm.js';  // must exist next to the worker
+const APRILTAG_WASM_BIN   = '/vendor/apriltag/apriltag_wasm.wasm';// served as application/wasm
 
-/* ---------- dom helpers ---------- */
+/* ----------- DOM helpers ----------- */
 const $ = s => document.querySelector(s);
 const statsEl = $('#stats'), msgEl = $('#msg'), pinsEl = $('#pins');
 const cam = $('#cam'), work = $('#work'); const wctx = work.getContext('2d', { willReadFrequently: true });
 
-/* ---------- robust JSON loader (fixes “string did not match expected pattern”) ---------- */
-async function loadJSON(url) {
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) throw new Error(`Config HTTP ${r.status}`);
+/* ----------- robust JSON loader ----------- */
+async function loadJSON(url){
+  const r = await fetch(url,{cache:'no-store'}); if(!r.ok) throw new Error(`Config HTTP ${r.status}`);
   const txt = await r.text();
-
-  // scrub common gotchas
-  const clean = txt
-    .replace(/^\uFEFF/, '')          // BOM
-    .replace(/^\s*\/\/.*$/mg, '');   // stray line comments
-
-  try {
-    return JSON.parse(clean);
-  } catch (e) {
-    // Show the first 200 chars so we can see if it’s HTML or a bad character
-    const head = clean.slice(0, 200);
-    const codes = Array.from(head).map(c => c.charCodeAt(0)).join(',');
-    const hint = head.replace(/[\r\n]/g, '⏎');
-    document.getElementById('msg').textContent =
-      `JSON parse failed. First 200 chars: ${hint}\nChar codes: [${codes}]`;
-    throw e;
-  }
+  const clean = txt.replace(/^\uFEFF/,'').replace(/^\s*\/\/.*$/mg,'');
+  return JSON.parse(clean);
 }
 
-/* ---------- robust AprilTag module loader (works with ESM or UMD builds) ---------- */
-async function loadAprilTag() {
-  let mod;
-  try {
-    mod = await import(APRILTAG_JS);
-  } catch {
-    await new Promise((res, rej) => {
-      const s = document.createElement('script');
-      s.src = APRILTAG_JS; s.onload = res; s.onerror = rej;
-      document.head.appendChild(s);
-    });
-    mod = window || {};
+/* ----------- grayscale ----------- */
+function toGray(rgba,w,h){
+  const g = new Uint8Array(w*h);
+  for(let i=0,j=0;j<g.length;i+=4,j++){
+    g[j] = (0.299*rgba[i] + 0.587*rgba[i+1] + 0.114*rgba[i+2])|0;
   }
-  const factory =
-    mod.default ||
-    mod.createAprilTagModule ||
-    mod.createModule ||
-    mod.Module ||
-    mod; // last resort
-
-  if (typeof factory !== 'function') {
-    throw new Error('AprilTag factory not found; check apriltag.js packaging/path');
-  }
-  const detector = await factory({
-    locateFile: (p, dir) => (p.endsWith('.wasm') ? APRILTAG_WASM : (dir ? dir + p : p))
-  });
-  if (!detector.detect) throw new Error('detector.detect not found on AprilTag module');
-  return detector;
+  return g;
 }
 
-/* ---------- math: homography solve (planar tags) ---------- */
-function computeHomography(world, image){
-  // Solve for h (8 unknowns; set h[8]=1) via normal equations.
-  const A=[]; const b=[];
-  for (let i=0;i<world.length;i++){
-    const [X,Y]=world[i], [u,v]=image[i];
-    A.push([X,Y,1, 0,0,0, -u*X, -u*Y]); b.push(u);
-    A.push([0,0,0, X,Y,1, -v*X, -v*Y]); b.push(v);
+/* ----------- worker-based detector ----------- */
+async function loadAprilTag(){
+  // quick existence check for the glue/wasm; helps surface path issues early
+  await Promise.all([
+    fetch(APRILTAG_WASM_JS, {cache:'no-store'}),
+    fetch(APRILTAG_WASM_BIN, {cache:'no-store'})
+  ]).then(rs => rs.forEach(r => { if(!r.ok) throw new Error(`Missing: ${r.url}`); }));
+
+  const worker = new Worker(APRILTAG_WORKER_URL, { type: 'classic' });
+  const RemoteApriltag = Comlink.wrap(worker);
+
+  // The worker constructor expects a "ready" callback; pass via Comlink.
+  let readyResolve; const ready = new Promise(r => (readyResolve = r));
+  const detector = await new RemoteApriltag(Comlink.proxy(() => readyResolve()));
+  await ready; // wait for WASM initialize inside the worker
+  return detector; // proxy; methods are async
+}
+
+/* ----------- homography math ----------- */
+function computeHomography(world,image){
+  const A=[], b=[];
+  for(let i=0;i<world.length;i++){
+    const [X,Y]=world[i],[u,v]=image[i];
+    A.push([X,Y,1, 0,0,0, -u*X,-u*Y]); b.push(u);
+    A.push([0,0,0, X,Y,1, -v*X,-v*Y]); b.push(v);
   }
-  const m=A.length, n=8;
-  const AtA = Array.from({length:n},()=>new Float64Array(n));
-  const Atb = new Float64Array(n);
-  for(let r=0;r<m;r++){
-    const R=A[r], br=b[r];
-    for(let i=0;i<n;i++){
-      Atb[i]+=R[i]*br;
-      for(let j=0;j<n;j++) AtA[i][j]+=R[i]*R[j];
-    }
-  }
+  const n=8, m=A.length;
+  const AtA=Array.from({length:n},()=>new Float64Array(n));
+  const Atb=new Float64Array(n);
+  for(let r=0;r<m;r++){ const R=A[r], br=b[r]; for(let i=0;i<n;i++){ Atb[i]+=R[i]*br; for(let j=0;j<n;j++) AtA[i][j]+=R[i]*R[j]; } }
   function choleskySolve(A,b){
     const n=A.length, L=Array.from({length:n},()=>new Float64Array(n));
-    for(let i=0;i<n;i++){
-      for(let j=0;j<=i;j++){
-        let s=A[i][j]; for(let k=0;k<j;k++) s-=L[i][k]*L[j][k];
-        L[i][j]=(i===j)?Math.sqrt(Math.max(s,1e-12)):s/L[j][j];
-      }
-    }
+    for(let i=0;i<n;i++){ for(let j=0;j<=i;j++){ let s=A[i][j]; for(let k=0;k<j;k++) s-=L[i][k]*L[j][k]; L[i][j]=(i===j)?Math.sqrt(Math.max(s,1e-12)):s/L[j][j]; } }
     const y=new Float64Array(n); for(let i=0;i<n;i++){ let s=b[i]; for(let k=0;k<i;k++) s-=L[i][k]*y[k]; y[i]=s/L[i][i]; }
     const x=new Float64Array(n); for(let i=n-1;i>=0;i--){ let s=y[i]; for(let k=i+1;k<n;k++) s-=L[k][i]*x[k]; x[i]=s/L[i][i]; }
     return x;
   }
   const h8 = choleskySolve(AtA, Atb);
-  return new Float64Array([ h8[0],h8[1],h8[2], h8[3],h8[4],h8[5], h8[6],h8[7], 1 ]);
+  return new Float64Array([h8[0],h8[1],h8[2], h8[3],h8[4],h8[5], h8[6],h8[7], 1]);
 }
-const applyH = (H,X,Y)=>{ const u=H[0]*X+H[1]*Y+H[2], v=H[3]*X+H[4]*Y+H[5], w=H[6]*X+H[7]*Y+H[8]; return [u/w,v/w]; };
-const smooth = (p,n,a=0.25)=>!p?n:[p[0]*(1-a)+n[0]*a,p[1]*(1-a)+n[1]*a];
+const applyH=(H,X,Y)=>{const u=H[0]*X+H[1]*Y+H[2], v=H[3]*X+H[4]*Y+H[5], w=H[6]*X+H[7]*Y+H[8]; return [u/w,v/w];};
+const smooth=(p,n,a=0.25)=>!p?n:[p[0]*(1-a)+n[0]*a, p[1]*(1-a)+n[1]*a];
 
-/* ---------- main ---------- */
+/* ----------- detection shape adapters ----------- */
+const getId = d => d.id ?? d.tag_id ?? d.tagId ?? d.code;
+const getCorners = d => {
+  if (d.corners) return d.corners;                       // [[u,v],...]
+  if (d.c) return d.c;                                   // [[u,v],...]
+  if (d.lb && d.lt && d.rt && d.rb) return [d.lt,d.rt,d.rb,d.lb].map(p=>[p.x??p[0], p.y??p[1]]);
+  if (d.p) return d.p.map(p=>[p.x??p[0], p.y??p[1]]);
+  return null;
+};
+
+/* ----------- main ----------- */
 let cfg, detector, stream, track;
 const tagWorld=[], tagImage=[];
 let H=null;
 const pinEls=new Map(), pinSmoothed=new Map();
 const DETECT_W=640, K_MIN=4;
 
-function logError(e){
-  const m=(e && (e.stack||e.message)) || String(e);
-  msgEl.textContent=m;
-  console.error(e);
-}
+function updateStats(n){ statsEl.textContent = `${n} tag${n===1?'':'s'}`; }
+function logError(e){ const m=(e && (e.stack||e.message)) || String(e); msgEl.textContent=m; console.error(e); }
 
 async function init(){
   cfg = await loadJSON(CFG_URL);
@@ -171,7 +141,7 @@ async function init(){
   cam.srcObject = stream; await cam.play();
   track = stream.getVideoTracks?.()[0];
 
-  // Torch (best-effort)
+  // Torch (best effort)
   try {
     const caps = track?.getCapabilities?.();
     if (caps?.torch) {
@@ -185,13 +155,13 @@ async function init(){
   } catch {}
 
   // Downscale canvas for detection
-  const vw=cam.videoWidth, vh=cam.videoHeight, sc=DETECT_W/vw;
-  work.width=DETECT_W; work.height=Math.round(vh*sc);
+  const vw = cam.videoWidth, vh = cam.videoHeight, sc = DETECT_W / vw;
+  work.width = DETECT_W; work.height = Math.round(vh * sc);
 
-  // Create pin DOMs
+  // Pin DOMs
   for (const h of (cfg.hotspots||[])){
     const el=document.createElement('div'); el.className='pin';
-    if (h.img){ const img=document.createElement('img'); img.src=h.img; el.appendChild(img); }
+    if (h.img){ const im=document.createElement('img'); im.src=h.img; el.appendChild(im); }
     const cap=document.createElement('span'); cap.textContent=h.label||''; el.appendChild(cap);
     pinsEl.appendChild(el); pinEls.set(h,el);
   }
@@ -200,15 +170,17 @@ async function init(){
   requestAnimationFrame(loop);
 }
 
-function gather(dets, sx, sy){
-  tagWorld.length=0; tagImage.length=0;
-  const lut=new Map(cfg.apriltags.map(t=>[t.id,t]));
-  for(const d of dets){
-    const t = lut.get(d.id); if (!t) continue;
+function gather(dets,sx,sy){
+  tagWorld.length = 0; tagImage.length = 0;
+  const lut = new Map(cfg.apriltags.map(t => [t.id, t]));
+  for (const d of dets){
+    const id = getId(d); const t = lut.get(id); if (!t) continue;
+    const corners = getCorners(d); if (!corners || corners.length!==4) continue;
+
     const s=t.size_mm/2, wx=t.center_xy_mm[0], wy=t.center_xy_mm[1];
-    const worldCorners=[[wx-s,wy+s],[wx+s,wy+s],[wx+s,wy-s],[wx-s,wy-s]];
-    const imgCorners=d.corners.map(([u,v])=>[u/sx,v/sy]);
-    for(let i=0;i<4;i++){ tagWorld.push(worldCorners[i]); tagImage.push(imgCorners[i]); }
+    const world=[[wx-s,wy+s],[wx+s,wy+s],[wx+s,wy-s],[wx-s,wy-s]];
+    const image=corners.map(([u,v])=>[u/sx, v/sy]);
+    for(let i=0;i<4;i++){ tagWorld.push(world[i]); tagImage.push(image[i]); }
   }
 }
 
@@ -216,7 +188,7 @@ function layoutPins(){
   if(!H) return;
   const vw=cam.videoWidth, vh=cam.videoHeight;
   for(const h of (cfg.hotspots||[])){
-    const el=pinEls.get(h);
+    const el=pinEls.get(h); if(!el) continue;
     const [u,v]=applyH(H,h.xy_mm[0],h.xy_mm[1]);
     const sm=smooth(pinSmoothed.get(h),[u,v],0.25);
     pinSmoothed.set(h,sm);
@@ -225,24 +197,23 @@ function layoutPins(){
   }
 }
 
-function updateStats(n){ statsEl.textContent=`${n} tag${n===1?'':'s'}`; }
-
 async function loop(){
   try{
     wctx.drawImage(cam,0,0,work.width,work.height);
-    const img=wctx.getImageData(0,0,work.width,work.height);
-    const dets=detector.detect(img.data,work.width,work.height); // [{id,corners:[[u,v]x4]}, ...]
+    const frame = wctx.getImageData(0,0,work.width,work.height);
+    const gray = toGray(frame.data, work.width, work.height);
+    const dets = await detector.detect(gray, work.width, work.height); // worker -> returns Promise
 
     const sx=cam.videoWidth/work.width, sy=cam.videoHeight/work.height;
-    gather(dets,sx,sy);
+    gather(dets, sx, sy);
 
-    if(tagWorld.length>=K_MIN){
-      H=computeHomography(tagWorld,tagImage);
-      msgEl.textContent='';
+    if(tagWorld.length >= K_MIN){
+      H = computeHomography(tagWorld, tagImage);
+      msgEl.textContent = '';
       layoutPins();
       updateStats(dets.length);
     } else {
-      msgEl.textContent='Move closer until 3–4 tags are visible';
+      msgEl.textContent = 'Move closer until 3–4 tags are visible';
       updateStats(dets.length);
     }
   } catch(e){ logError(e); }
