@@ -1,0 +1,5 @@
+/data/*
+  Content-Type: application/json; charset=utf-8
+
+/vendor/apriltag/*.wasm
+  Content-Type: application/wasm
