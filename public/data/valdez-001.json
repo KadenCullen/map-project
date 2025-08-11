@@ -9,8 +9,7 @@
     { "id": 103, "center_xy_mm": [210, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] }
   ],
   "hotspots": [
-    "hotspots": [
+  
   { "xy_mm": [217.5, 216], "z_mm": 0, "label": "Map center", "img": "https://github.com/user-attachments/assets/32f6af2b-2f7d-4e62-81ed-39fca012ca6b" }
 ]
-  ]
 }
