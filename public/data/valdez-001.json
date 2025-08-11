@@ -9,6 +9,6 @@
     { "id": 103, "center_xy_mm": [210, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] }
   ],
   "hotspots": [
-    { "xy_mm": [217.5, 432], "z_mm": 0, "label": "Map center", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.0/Screenshot.2025-08-11.at.1.25.27.PM.png" }
+    { "xy_mm": [217.5, -216], "z_mm": 0, "label": "Map center", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.1/test.png" }
   ]
 }
