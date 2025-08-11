@@ -9,7 +9,7 @@
   html,body{margin:0;height:100%;background:#0b0d10;color:#e7eaee;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
   #hud{position:fixed;inset:0;pointer-events:none}
   #stats{position:fixed;left:10px;bottom:10px;background:#1118;padding:8px 10px;border:1px solid #1b2028;border-radius:10px;font-size:12px}
-  #msg{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#1118;padding:8px 10px;border:1px solid #1b2028;border-radius:10px;font-size:12px}
+  #msg{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#1118;padding:8px 10px;border:1px solid #1b2028;border-radius:10px;font-size:12px;max-width:92vw}
   #pins{position:absolute;inset:0;pointer-events:none}
   .pin{position:absolute;transform:translate(-50%,-100%);padding:4px 6px;border-radius:10px;border:1px solid #1b2028;background:#141a22cc;backdrop-filter:blur(3px);pointer-events:auto}
   .pin img{display:block;max-width:160px;max-height:100px;border-radius:8px;margin-bottom:4px}
@@ -30,265 +30,200 @@
 <button id="torch" hidden>Torch</button>
 
 <script type="module">
-/* ---------- config ---------- */
+/* ---------- paths ---------- */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
 const CFG_URL = `/data/${id}.json`;
 
-// Change these if you put the WASM elsewhere:
+// Make sure these match your file locations
 const APRILTAG_JS   = '/vendor/apriltag/apriltag.js';
 const APRILTAG_WASM = '/vendor/apriltag/apriltag_wasm.wasm';
 
-// Detection resolution (work canvas width). Higher = better but slower.
-const DETECT_W = 640;
-
-/* ---------- utils ---------- */
-const $ = sel => document.querySelector(sel);
+/* ---------- dom helpers ---------- */
+const $ = s => document.querySelector(s);
 const statsEl = $('#stats'), msgEl = $('#msg'), pinsEl = $('#pins');
 const cam = $('#cam'), work = $('#work'); const wctx = work.getContext('2d', { willReadFrequently: true });
 
-function now(){ return performance.now(); }
+/* ---------- robust JSON loader (fixes “string did not match expected pattern”) ---------- */
+async function loadJSON(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`Config HTTP ${r.status}`);
+  const txt = await r.text();
+  const clean = txt
+    .replace(/^\uFEFF/, '')          // strip BOM
+    .replace(/^\s*\/\/.*$/mg, '');   // strip line comments if any slipped in
+  return JSON.parse(clean);
+}
 
-// Compute homography H (3x3) from world points (x,y) on Z=0 to image points (u,v).
-// Uses DLT with least-squares (>=4 points). Returns Float64Array(9) row-major.
+/* ---------- robust AprilTag module loader (works with ESM or UMD builds) ---------- */
+async function loadAprilTag() {
+  let mod;
+  try {
+    mod = await import(APRILTAG_JS);
+  } catch {
+    await new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = APRILTAG_JS; s.onload = res; s.onerror = rej;
+      document.head.appendChild(s);
+    });
+    mod = window || {};
+  }
+  const factory =
+    mod.default ||
+    mod.createAprilTagModule ||
+    mod.createModule ||
+    mod.Module ||
+    mod; // last resort
+
+  if (typeof factory !== 'function') {
+    throw new Error('AprilTag factory not found; check apriltag.js packaging/path');
+  }
+  const detector = await factory({
+    locateFile: (p, dir) => (p.endsWith('.wasm') ? APRILTAG_WASM : (dir ? dir + p : p))
+  });
+  if (!detector.detect) throw new Error('detector.detect not found on AprilTag module');
+  return detector;
+}
+
+/* ---------- math: homography solve (planar tags) ---------- */
 function computeHomography(world, image){
-  // Build A * h = 0
-  const n = world.length;
-  const A = new Float64Array(n*2*9); // we’ll solve via SVD w/ numeric.js-ish manual? Simpler: use linear least squares with 8 unknowns (h normalized)
-  // Implement classic DLT: for each correspondence (X,Y) -> (u,v)
-  const rows = [];
-  for (let i=0;i<n;i++){
+  // Solve for h (8 unknowns; set h[8]=1) via normal equations.
+  const A=[]; const b=[];
+  for (let i=0;i<world.length;i++){
     const [X,Y]=world[i], [u,v]=image[i];
-    rows.push([-X,-Y,-1, 0, 0, 0, u*X, u*Y, u]);
-    rows.push([0, 0, 0,-X,-Y,-1, v*X, v*Y, v]);
+    A.push([X,Y,1, 0,0,0, -u*X, -u*Y]); b.push(u);
+    A.push([0,0,0, X,Y,1, -v*X, -v*Y]); b.push(v);
   }
-  // Solve Ah = 0 via SVD. To avoid shipping an SVD, use numeric eigen on A^T A.
-  const m = rows.length, k = 9;
-  const ATA = Array.from({length:k},()=>new Float64Array(k));
+  const m=A.length, n=8;
+  const AtA = Array.from({length:n},()=>new Float64Array(n));
+  const Atb = new Float64Array(n);
   for(let r=0;r<m;r++){
-    const row = rows[r];
-    for(let i=0;i<k;i++){
-      const ri = row[i];
-      for(let j=0;j<k;j++){
-        ATA[i][j] += ri*row[j];
-      }
+    const R=A[r], br=b[r];
+    for(let i=0;i<n;i++){
+      Atb[i]+=R[i]*br;
+      for(let j=0;j<n;j++) AtA[i][j]+=R[i]*R[j];
     }
   }
-  // Power iteration for smallest eigenvector is messy; instead use naive Jacobi? For simplicity and stability here:
-  // Use a tiny imported SVD/eigen. To keep this file single-file, we do a minimal numeric eigen via library-free approach is too long.
-  // So we’ll reduce the unknowns to 8 by fixing h[8]=1 and solve least squares: A8 * h8 = b
-  // Rebuild A8,b using standard formulation:
-  const A8=[]; const b8=[];
-  for (let i=0;i<n;i++){
-    const [X,Y]=world[i], [u,v]=image[i];
-    A8.push([X,Y,1, 0,0,0, -u*X, -u*Y]); b8.push(u);
-    A8.push([0,0,0, X,Y,1, -v*X, -v*Y]); b8.push(v);
-  }
-  // Solve normal equations (A8^T A8) h8 = A8^T b8
-  const rows8=A8.length, cols8=8;
-  const AtA = Array.from({length:cols8},()=>new Float64Array(cols8));
-  const Atb = new Float64Array(cols8);
-  for(let r=0;r<rows8;r++){
-    const row=A8[r], br=b8[r];
-    for(let i=0;i<cols8;i++){
-      Atb[i]+=row[i]*br;
-      for(let j=0;j<cols8;j++){
-        AtA[i][j]+=row[i]*row[j];
-      }
-    }
-  }
-  // Cholesky solve AtA * x = Atb
   function choleskySolve(A,b){
-    const n=A.length;
-    const L=Array.from({length:n},()=>new Float64Array(n));
+    const n=A.length, L=Array.from({length:n},()=>new Float64Array(n));
     for(let i=0;i<n;i++){
       for(let j=0;j<=i;j++){
-        let s=A[i][j];
-        for(let k=0;k<j;k++) s-=L[i][k]*L[j][k];
-        if(i===j){ L[i][j]=Math.sqrt(Math.max(s,1e-12)); }
-        else { L[i][j]=s/L[j][j]; }
+        let s=A[i][j]; for(let k=0;k<j;k++) s-=L[i][k]*L[j][k];
+        L[i][j]=(i===j)?Math.sqrt(Math.max(s,1e-12)):s/L[j][j];
       }
     }
-    // Ly=b
-    const y=new Float64Array(n);
-    for(let i=0;i<n;i++){
-      let s=b[i];
-      for(let k=0;k<i;k++) s-=L[i][k]*y[k];
-      y[i]=s/L[i][i];
-    }
-    // L^T x = y
-    const x=new Float64Array(n);
-    for(let i=n-1;i>=0;i--){
-      let s=y[i];
-      for(let k=i+1;k<n;k++) s-=L[k][i]*x[k];
-      x[i]=s/L[i][i];
-    }
+    const y=new Float64Array(n); for(let i=0;i<n;i++){ let s=b[i]; for(let k=0;k<i;k++) s-=L[i][k]*y[k]; y[i]=s/L[i][i]; }
+    const x=new Float64Array(n); for(let i=n-1;i>=0;i--){ let s=y[i]; for(let k=i+1;k<n;k++) s-=L[k][i]*x[k]; x[i]=s/L[i][i]; }
     return x;
   }
   const h8 = choleskySolve(AtA, Atb);
-  const H = new Float64Array([
-    h8[0], h8[1], h8[2],
-    h8[3], h8[4], h8[5],
-    h8[6], h8[7], 1
-  ]);
-  return H;
+  return new Float64Array([ h8[0],h8[1],h8[2], h8[3],h8[4],h8[5], h8[6],h8[7], 1 ]);
 }
-
-// Apply homography to a point (X,Y) -> (u,v)
-function applyH(H, X, Y){
-  const u = H[0]*X + H[1]*Y + H[2];
-  const v = H[3]*X + H[4]*Y + H[5];
-  const w = H[6]*X + H[7]*Y + H[8];
-  return [u/w, v/w];
-}
-
-// Simple EMA smoother for 2D points
-function smooth(prev, next, a=0.2){
-  if(!prev) return next;
-  return [prev[0]*(1-a)+next[0]*a, prev[1]*(1-a)+next[1]*a];
-}
+const applyH = (H,X,Y)=>{ const u=H[0]*X+H[1]*Y+H[2], v=H[3]*X+H[4]*Y+H[5], w=H[6]*X+H[7]*Y+H[8]; return [u/w,v/w]; };
+const smooth = (p,n,a=0.25)=>!p?n:[p[0]*(1-a)+n[0]*a,p[1]*(1-a)+n[1]*a];
 
 /* ---------- main ---------- */
-let cfg, detector, videoStream, track;
-let lastT = 0, fps = 0;
-const K_MIN_POINTS = 4; // need at least 4 correspondences
+let cfg, detector, stream, track;
+const tagWorld=[], tagImage=[];
+let H=null;
+const pinEls=new Map(), pinSmoothed=new Map();
+const DETECT_W=640, K_MIN=4;
 
-const tagWorldPoints = [];   // per-frame subset of world points
-const tagImagePoints = [];   // per-frame subset of image points
-let H = null;                // current homography
-const pinEls = new Map();    // hotspot -> element
-const pinSmoothed = new Map();
+function logError(e){
+  const m=(e && (e.stack||e.message)) || String(e);
+  msgEl.textContent=m;
+  console.error(e);
+}
 
 async function init(){
-  cfg = await (await fetch(CFG_URL, {cache:'no-store'})).json();
+  cfg = await loadJSON(CFG_URL);
 
-  // Load WASM detector (self-hosted)
-  const mod = await import(APRILTAG_JS);
-  detector = await mod.default({ locateFile:(p)=> p.endsWith('.wasm') ? APRILTAG_WASM : p });
+  detector = await loadAprilTag();
 
   // Camera
-  const constraints = { video: { facingMode: 'environment' } };
-  videoStream = await navigator.mediaDevices.getUserMedia(constraints);
-  cam.srcObject = videoStream;
-  await cam.play();
-  track = videoStream.getVideoTracks()[0];
+  stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: {ideal:'environment'} } });
+  cam.srcObject = stream; await cam.play();
+  track = stream.getVideoTracks?.()[0];
+
+  // Torch (best-effort)
   try {
-    const caps = track.getCapabilities?.();
-    if (caps?.torch) $('#torch').hidden = false;
-    $('#torch').onclick = async () => {
-      const st = track.getSettings();
-      await track.applyConstraints({ advanced: [{ torch: !st.torch }]});
-    };
+    const caps = track?.getCapabilities?.();
+    if (caps?.torch) {
+      const btn = document.getElementById('torch');
+      btn.hidden = false;
+      btn.onclick = async () => {
+        const st = track.getSettings?.() || {};
+        await track.applyConstraints({ advanced: [{ torch: !st.torch }]});
+      };
+    }
   } catch {}
 
-  // Work canvas sizing
-  const vw = cam.videoWidth, vh = cam.videoHeight;
-  const scale = DETECT_W / vw;
-  work.width = DETECT_W;
-  work.height = Math.round(vh * scale);
+  // Downscale canvas for detection
+  const vw=cam.videoWidth, vh=cam.videoHeight, sc=DETECT_W/vw;
+  work.width=DETECT_W; work.height=Math.round(vh*sc);
 
-  // Build pin DOMs
-  for (const h of cfg.hotspots){
-    const el = document.createElement('div');
-    el.className = 'pin';
-    if (h.img){
-      const img = document.createElement('img'); img.src = h.img; el.appendChild(img);
-    }
-    const cap = document.createElement('span'); cap.textContent = h.label || '';
-    el.appendChild(cap);
-    pinsEl.appendChild(el);
-    pinEls.set(h, el);
+  // Create pin DOMs
+  for (const h of (cfg.hotspots||[])){
+    const el=document.createElement('div'); el.className='pin';
+    if (h.img){ const img=document.createElement('img'); img.src=h.img; el.appendChild(img); }
+    const cap=document.createElement('span'); cap.textContent=h.label||''; el.appendChild(cap);
+    pinsEl.appendChild(el); pinEls.set(h,el);
   }
 
-  msgEl.textContent = 'Align so 3–4 tags are in view';
+  msgEl.textContent='Aim so 3–4 tags are visible';
   requestAnimationFrame(loop);
 }
 
-function gatherCorrespondences(dets, sx, sy){
-  tagWorldPoints.length = 0; tagImagePoints.length = 0;
-
-  // Build a lookup by id -> world corner coords in mm (relative to map origin)
-  const byId = new Map(cfg.apriltags.map(t => [t.id, t]));
-
-  for (const d of dets){
-    const t = byId.get(d.id);
-    if (!t) continue;
-    // world corners (clockwise) from center & size
-    const s = t.size_mm/2;
-    const wx = t.center_xy_mm[0], wy = t.center_xy_mm[1];
-    const worldCorners = [
-      [wx - s, wy + s], // top-left
-      [wx + s, wy + s], // top-right
-      [wx + s, wy - s], // bottom-right
-      [wx - s, wy - s]  // bottom-left
-    ];
-    // image corners from detector (already ordered TL,TR,BR,BL typically)
-    const imgCorners = d.corners.map(([u,v]) => [u/sx, v/sy]); // rescale to full video coords
-
-    for (let i=0;i<4;i++){
-      tagWorldPoints.push(worldCorners[i]);
-      tagImagePoints.push(imgCorners[i]);
-    }
+function gather(dets, sx, sy){
+  tagWorld.length=0; tagImage.length=0;
+  const lut=new Map(cfg.apriltags.map(t=>[t.id,t]));
+  for(const d of dets){
+    const t = lut.get(d.id); if (!t) continue;
+    const s=t.size_mm/2, wx=t.center_xy_mm[0], wy=t.center_xy_mm[1];
+    const worldCorners=[[wx-s,wy+s],[wx+s,wy+s],[wx+s,wy-s],[wx-s,wy-s]];
+    const imgCorners=d.corners.map(([u,v])=>[u/sx,v/sy]);
+    for(let i=0;i<4;i++){ tagWorld.push(worldCorners[i]); tagImage.push(imgCorners[i]); }
   }
 }
 
 function layoutPins(){
-  if (!H) return;
-  const vw = cam.videoWidth, vh = cam.videoHeight;
-  for (const h of cfg.hotspots){
-    const el = pinEls.get(h);
-    const [u, v] = applyH(H, h.xy_mm[0], h.xy_mm[1]);
-    // smooth
-    const sm = smooth(pinSmoothed.get(h), [u, v], 0.25);
-    pinSmoothed.set(h, sm);
-    // place in screen CSS pixels
-    el.style.left = `${(sm[0] / vw) * 100}vw`;
-    el.style.top  = `${(sm[1] / vh) * 100}vh`;
+  if(!H) return;
+  const vw=cam.videoWidth, vh=cam.videoHeight;
+  for(const h of (cfg.hotspots||[])){
+    const el=pinEls.get(h);
+    const [u,v]=applyH(H,h.xy_mm[0],h.xy_mm[1]);
+    const sm=smooth(pinSmoothed.get(h),[u,v],0.25);
+    pinSmoothed.set(h,sm);
+    el.style.left=`${(sm[0]/vw)*100}vw`;
+    el.style.top =`${(sm[1]/vh)*100}vh`;
   }
 }
 
-function updateStats(nTags){
-  statsEl.textContent = `${nTags} tag${nTags===1?'':'s'} · ${fps.toFixed(0)} fps`;
-}
+function updateStats(n){ statsEl.textContent=`${n} tag${n===1?'':'s'}`; }
 
-async function loop(t){
-  const dt = t - lastT; lastT = t; fps = 1000/(dt||1000);
+async function loop(){
+  try{
+    wctx.drawImage(cam,0,0,work.width,work.height);
+    const img=wctx.getImageData(0,0,work.width,work.height);
+    const dets=detector.detect(img.data,work.width,work.height); // [{id,corners:[[u,v]x4]}, ...]
 
-  // Draw frame to work canvas (downscaled)
-  wctx.drawImage(cam, 0, 0, work.width, work.height);
-  const imgData = wctx.getImageData(0, 0, work.width, work.height);
+    const sx=cam.videoWidth/work.width, sy=cam.videoHeight/work.height;
+    gather(dets,sx,sy);
 
-  // Detect
-  const dets = detector.detect(imgData.data, work.width, work.height);
-  // det: { id: number, corners: [[u,v]x4] } in work-canvas coords
-
-  // Compute homography if we have enough correspondences
-  const sx = cam.videoWidth / work.width;
-  const sy = cam.videoHeight / work.height;
-  gatherCorrespondences(dets, sx, sy);
-
-  if (tagWorldPoints.length >= K_MIN_POINTS){
-    try {
-      H = computeHomography(tagWorldPoints, tagImagePoints);
-      msgEl.textContent = '';
+    if(tagWorld.length>=K_MIN){
+      H=computeHomography(tagWorld,tagImage);
+      msgEl.textContent='';
       layoutPins();
       updateStats(dets.length);
-    } catch (e){
-      // keep previous H if solve fails
+    } else {
+      msgEl.textContent='Move closer until 3–4 tags are visible';
       updateStats(dets.length);
     }
-  } else {
-    msgEl.textContent = 'Move closer until 3–4 tags are visible';
-    updateStats(dets.length);
-  }
-
+  } catch(e){ logError(e); }
   requestAnimationFrame(loop);
 }
 
-init().catch(err => {
-  msgEl.textContent = err.message;
-  console.error(err);
-});
+init().catch(logError);
 </script>
 </body>
 </html>
