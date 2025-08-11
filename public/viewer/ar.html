@@ -30,6 +30,19 @@
 <button id="torch" hidden>Torch</button>
 
 <script type="module">
+
+window.addEventListener('error', e => {
+  const m = `JS error: ${e.message}`;
+  const msg = document.getElementById('msg'); if (msg) msg.textContent = m;
+  console.error(e);
+});
+window.addEventListener('unhandledrejection', e => {
+  const m = `Promise error: ${e.reason && e.reason.message ? e.reason.message : e.reason}`;
+  const msg = document.getElementById('msg'); if (msg) msg.textContent = m;
+  console.error(e);
+});
+});
+  
 /* ---------- paths ---------- */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
