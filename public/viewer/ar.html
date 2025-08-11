@@ -46,7 +46,7 @@ window.addEventListener('unhandledrejection', e => {
 /* ---------- paths ---------- */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
-const CFG_URL = `/data/${id}.json`;
+const CFG_URL = `/data/${id}.json?v=5`;
 
 // Make sure these match your file locations
 const APRILTAG_JS   = '/vendor/apriltag/apriltag.js';
