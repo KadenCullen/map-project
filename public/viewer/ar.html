@@ -38,7 +38,7 @@ addEventListener('unhandledrejection', e => { const m=`Promise error: ${e.reason
 /* ----------- config / paths ----------- */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
-const CFG_URL = `/data/${id}.json?v=10`;  // cache-bust
+const CFG_URL = `/data/${id}.json?v=12`;  // cache-bust
 const APRILTAG_WORKER_URL = '/vendor/apriltag/apriltag.js';
 const APRILTAG_WASM_JS    = '/vendor/apriltag/apriltag_wasm.js';
 const APRILTAG_WASM_BIN   = '/vendor/apriltag/apriltag_wasm.wasm';
@@ -73,6 +73,47 @@ async function loadAprilTag(){
   await detector.set_return_pose(0);
   await detector.set_max_detections(0);
   return detector;
+}
+
+/* ----------- fullscreen image viewer ----------- */
+function showFullscreenImage(src, label) {
+  // Create fullscreen overlay
+  const overlay = document.createElement('div');
+  overlay.style.cssText = `
+    position: fixed; inset: 0; z-index: 1000; 
+    background: rgba(0,0,0,0.9); display: flex; 
+    align-items: center; justify-content: center; 
+    flex-direction: column; cursor: pointer;
+  `;
+  
+  // Create fullscreen image
+  const img = document.createElement('img');
+  img.src = src;
+  img.style.cssText = `
+    max-width: 95vw; max-height: 85vh; 
+    object-fit: contain; border-radius: 12px;
+  `;
+  
+  // Create caption
+  const caption = document.createElement('div');
+  caption.textContent = label;
+  caption.style.cssText = `
+    color: white; font-size: 18px; margin-top: 16px; 
+    text-align: center; padding: 0 20px;
+  `;
+  
+  // Close on click or escape
+  overlay.onclick = () => document.body.removeChild(overlay);
+  document.addEventListener('keydown', function closeOnEscape(e) {
+    if (e.key === 'Escape') {
+      document.body.removeChild(overlay);
+      document.removeEventListener('keydown', closeOnEscape);
+    }
+  });
+  
+  overlay.appendChild(img);
+  overlay.appendChild(caption);
+  document.body.appendChild(overlay);
 }
 
 /* ----------- homography ----------- */
@@ -177,25 +218,81 @@ async function init(){
   const vw=cam.videoWidth, vh=cam.videoHeight, target=Math.min(1280, vw), sc=target/vw;
   work.width=Math.round(vw*sc); work.height=Math.round(vh*sc);
 
- // Pins
-for (const h of cfg.hotspots){
-  const el=document.createElement('div'); el.className='pin';
-  
-  // ADD THIS: Create image if present
-  if (h.img) {
-    const img = document.createElement('img');
-    img.src = h.img;
-    img.style.maxWidth = '160px';
-    img.style.maxHeight = '100px';
-    img.style.borderRadius = '8px';
-    img.style.marginBottom = '4px';
-    img.style.display = 'block';
-    el.appendChild(img);
+  // Pins with support for images, videos, and fullscreen
+  for (const h of cfg.hotspots){
+    const el=document.createElement('div'); el.className='pin';
+    
+    // Create media element (image or video)
+    if (h.img) {
+      const isVideo = h.img.match(/\.(mp4|mov|webm|m4v)$/i);
+      
+      if (isVideo) {
+        const video = document.createElement('video');
+        video.src = h.img;
+        video.controls = false;
+        video.autoplay = true;
+        video.loop = true;
+        video.muted = true;
+        video.playsInline = true;
+        video.style.maxWidth = '160px';
+        video.style.maxHeight = '120px';
+        video.style.objectFit = 'cover';
+        video.style.borderRadius = '8px';
+        video.style.marginBottom = '4px';
+        video.style.display = 'block';
+        video.style.cursor = 'pointer';
+        
+        // Fullscreen click handler for video
+        video.onclick = (e) => {
+          e.stopPropagation();
+          if (video.requestFullscreen) {
+            video.requestFullscreen();
+          } else if (video.webkitRequestFullscreen) {
+            video.webkitRequestFullscreen();
+          }
+        };
+        
+        video.onerror = () => {
+          console.warn('Video failed to load:', h.img);
+          video.style.display = 'none';
+        };
+        
+        el.appendChild(video);
+      } else {
+        const img = document.createElement('img');
+        img.src = h.img;
+        img.style.maxWidth = '160px';
+        img.style.maxHeight = '120px';
+        img.style.objectFit = 'cover';
+        img.style.borderRadius = '8px';
+        img.style.marginBottom = '4px';
+        img.style.display = 'block';
+        img.style.cursor = 'pointer';
+        
+        // Fullscreen click handler for image
+        img.onclick = (e) => {
+          e.stopPropagation();
+          showFullscreenImage(h.img, h.label);
+        };
+        
+        img.onerror = () => {
+          console.warn('Image failed to load:', h.img);
+          img.style.display = 'none';
+        };
+        
+        el.appendChild(img);
+      }
+    }
+    
+    // Label text
+    const cap=document.createElement('span'); 
+    cap.textContent=h.label||''; 
+    el.appendChild(cap);
+    
+    pinsEl.appendChild(el); 
+    pinEls.set(h,el);
   }
-  
-  const cap=document.createElement('span'); cap.textContent=h.label||''; el.appendChild(cap);
-  pinsEl.appendChild(el); pinEls.set(h,el);
-}
+
   msgEl.textContent='Aim so 3–4 tags are visible';
   requestAnimationFrame(loop);
 }
@@ -273,7 +370,7 @@ async function loop(){
     const dets=await detector.detect(gray, work.width, work.height);
 
     const sx=cam.videoWidth/work.width, sy=cam.videoHeight/work.height;
-    // Prefer centers if we have ≥4 tags; else fall back to one tag’s corners
+    // Prefer centers if we have ≥4 tags; else fall back to one tag's corners
     gatherCenters(dets, sx, sy);
     if (tagWorld.length >= K_MIN_CENTERS) {
       H = computeHomography(tagWorld, tagImage);
