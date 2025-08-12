@@ -242,7 +242,7 @@ function layoutPins(){
   }
   
   // Second pass: resolve collisions
-  const minDist = 180; // pixels apart (adjust this to control spacing)
+  const minDist = 210; // pixels apart (adjust this to control spacing)
   for(let i=0; i<positions.length; i++){
     for(let j=i+1; j<positions.length; j++){
       const a=positions[i], b=positions[j];
