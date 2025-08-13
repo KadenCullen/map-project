@@ -11,8 +11,62 @@
   #stats{position:fixed;left:10px;bottom:10px;background:#1118;padding:8px 10px;border:1px solid #1b2028;border-radius:10px;font-size:12px}
   #msg{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#1118;padding:8px 10px;border:1px solid #1b2028;border-radius:10px;font-size:12px;max-width:92vw;white-space:pre-wrap}
   #pins{position:absolute;inset:0;pointer-events:none}
-  .pin{position:absolute;transform:translate(-50%,-100%);padding:4px 6px;border-radius:10px;border:1px solid #1b2028;background:#141a22cc;backdrop-filter:blur(3px);pointer-events:auto}
-  .pin span{font-size:12px}
+  
+  /* Pin styles - now starts as a small dot */
+  .pin{position:absolute;transform:translate(-50%,-50%);pointer-events:auto}
+  
+  /* The dot marker */
+  .pin-dot{
+    width:16px;height:16px;
+    background:#8cc2ff;
+    border:2px solid #fff;
+    border-radius:50%;
+    cursor:pointer;
+    transition:all 0.2s ease;
+    box-shadow:0 2px 8px rgba(0,0,0,0.3);
+  }
+  .pin-dot:hover{
+    transform:scale(1.2);
+    background:#fff;
+  }
+  .pin-dot.expanded{
+    background:#fff;
+    transform:scale(1.1);
+  }
+  
+  /* Preview container */
+  .pin-preview{
+    display:none;
+    position:absolute;
+    bottom:calc(100% + 10px);
+    left:50%;
+    transform:translateX(-50%);
+    background:#141a22ee;
+    border:1px solid #1b2028;
+    border-radius:10px;
+    padding:6px;
+    backdrop-filter:blur(4px);
+    min-width:110px;
+    cursor:pointer;
+  }
+  .pin-preview.visible{
+    display:block;
+  }
+  .pin-preview img, .pin-preview video{
+    width:100px;
+    height:75px;
+    object-fit:cover;
+    border-radius:6px;
+    display:block;
+  }
+  .pin-preview span{
+    display:block;
+    font-size:11px;
+    text-align:center;
+    margin-top:4px;
+    color:#e7eaee;
+  }
+  
   video{position:fixed;inset:0;object-fit:cover;width:100%;height:100%}
   canvas{display:none}
   button#torch{position:fixed;right:10px;bottom:10px;z-index:10}
@@ -38,7 +92,7 @@ addEventListener('unhandledrejection', e => { const m=`Promise error: ${e.reason
 /* ----------- config / paths ----------- */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
-const CFG_URL = `/data/${id}.json?v=12`;  // cache-bust
+const CFG_URL = `/data/${id}.json?v=13`;  // cache-bust
 const APRILTAG_WORKER_URL = '/vendor/apriltag/apriltag.js';
 const APRILTAG_WASM_JS    = '/vendor/apriltag/apriltag_wasm.js';
 const APRILTAG_WASM_BIN   = '/vendor/apriltag/apriltag_wasm.wasm';
@@ -77,7 +131,6 @@ async function loadAprilTag(){
 
 /* ----------- fullscreen image viewer ----------- */
 function showFullscreenImage(src, label) {
-  // Create fullscreen overlay
   const overlay = document.createElement('div');
   overlay.style.cssText = `
     position: fixed; inset: 0; z-index: 1000; 
@@ -86,7 +139,6 @@ function showFullscreenImage(src, label) {
     flex-direction: column; cursor: pointer;
   `;
   
-  // Create fullscreen image
   const img = document.createElement('img');
   img.src = src;
   img.style.cssText = `
@@ -94,7 +146,6 @@ function showFullscreenImage(src, label) {
     object-fit: contain; border-radius: 12px;
   `;
   
-  // Create caption
   const caption = document.createElement('div');
   caption.textContent = label;
   caption.style.cssText = `
@@ -102,7 +153,6 @@ function showFullscreenImage(src, label) {
     text-align: center; padding: 0 20px;
   `;
   
-  // Close on click or escape
   overlay.onclick = () => document.body.removeChild(overlay);
   document.addEventListener('keydown', function closeOnEscape(e) {
     if (e.key === 'Escape') {
@@ -182,6 +232,7 @@ const tagWorld=[], tagImage=[];
 let H=null;
 const pinEls=new Map(), pinSmoothed=new Map();
 const K_MIN_CENTERS=4;
+let currentExpanded = null; // Track which pin is expanded
 
 function updateStats(n){ statsEl.textContent = `${n} tag${n===1?'':'s'}`; }
 function logError(e){ const m=(e && (e.stack||e.message)) || String(e); msgEl.textContent=m; console.error(e); }
@@ -218,11 +269,20 @@ async function init(){
   const vw=cam.videoWidth, vh=cam.videoHeight, target=Math.min(1280, vw), sc=target/vw;
   work.width=Math.round(vw*sc); work.height=Math.round(vh*sc);
 
-  // Pins with support for images, videos, and fullscreen
+  // Create progressive disclosure pins (dots → preview → fullscreen)
   for (const h of cfg.hotspots){
-    const el=document.createElement('div'); el.className='pin';
+    const el = document.createElement('div'); 
+    el.className = 'pin';
     
-    // Create media element (image or video)
+    // The dot marker
+    const dot = document.createElement('div');
+    dot.className = 'pin-dot';
+    
+    // Preview container (hidden initially)
+    const preview = document.createElement('div');
+    preview.className = 'pin-preview';
+    
+    // Add media to preview if exists
     if (h.img) {
       const isVideo = h.img.match(/\.(mp4|mov|webm|m4v)$/i);
       
@@ -234,16 +294,16 @@ async function init(){
         video.loop = true;
         video.muted = true;
         video.playsInline = true;
-        video.style.maxWidth = '160px';
-        video.style.maxHeight = '120px';
-        video.style.objectFit = 'cover';
-        video.style.borderRadius = '8px';
-        video.style.marginBottom = '4px';
-        video.style.display = 'block';
-        video.style.cursor = 'pointer';
         
-        // Fullscreen click handler for video
-        video.onclick = (e) => {
+        video.onerror = () => {
+          console.warn('Video failed to load:', h.img);
+          video.style.display = 'none';
+        };
+        
+        preview.appendChild(video);
+        
+        // Click preview for fullscreen video
+        preview.onclick = (e) => {
           e.stopPropagation();
           if (video.requestFullscreen) {
             video.requestFullscreen();
@@ -251,47 +311,67 @@ async function init(){
             video.webkitRequestFullscreen();
           }
         };
-        
-        video.onerror = () => {
-          console.warn('Video failed to load:', h.img);
-          video.style.display = 'none';
-        };
-        
-        el.appendChild(video);
       } else {
         const img = document.createElement('img');
         img.src = h.img;
-        img.style.maxWidth = '160px';
-        img.style.maxHeight = '120px';
-        img.style.objectFit = 'cover';
-        img.style.borderRadius = '8px';
-        img.style.marginBottom = '4px';
-        img.style.display = 'block';
-        img.style.cursor = 'pointer';
-        
-        // Fullscreen click handler for image
-        img.onclick = (e) => {
-          e.stopPropagation();
-          showFullscreenImage(h.img, h.label);
-        };
         
         img.onerror = () => {
           console.warn('Image failed to load:', h.img);
           img.style.display = 'none';
         };
         
-        el.appendChild(img);
+        preview.appendChild(img);
+        
+        // Click preview for fullscreen image
+        preview.onclick = (e) => {
+          e.stopPropagation();
+          showFullscreenImage(h.img, h.label);
+        };
       }
     }
     
-    // Label text
-    const cap=document.createElement('span'); 
-    cap.textContent=h.label||''; 
-    el.appendChild(cap);
+    // Add label to preview
+    const label = document.createElement('span');
+    label.textContent = h.label || '';
+    preview.appendChild(label);
     
+    // Dot click handler - toggle preview
+    dot.onclick = (e) => {
+      e.stopPropagation();
+      
+      // Close any other expanded pin
+      if (currentExpanded && currentExpanded !== preview) {
+        currentExpanded.classList.remove('visible');
+        currentExpanded.previousSibling.classList.remove('expanded');
+      }
+      
+      // Toggle this pin
+      const isExpanded = preview.classList.contains('visible');
+      if (isExpanded) {
+        preview.classList.remove('visible');
+        dot.classList.remove('expanded');
+        currentExpanded = null;
+      } else {
+        preview.classList.add('visible');
+        dot.classList.add('expanded');
+        currentExpanded = preview;
+      }
+    };
+    
+    el.appendChild(dot);
+    el.appendChild(preview);
     pinsEl.appendChild(el); 
-    pinEls.set(h,el);
+    pinEls.set(h, el);
   }
+  
+  // Click anywhere else to close previews
+  document.addEventListener('click', () => {
+    if (currentExpanded) {
+      currentExpanded.classList.remove('visible');
+      currentExpanded.previousSibling.classList.remove('expanded');
+      currentExpanded = null;
+    }
+  });
 
   msgEl.textContent='Aim so 3–4 tags are visible';
   requestAnimationFrame(loop);
@@ -327,38 +407,15 @@ function gatherOneTagCorners(list, sx, sy){
 function layoutPins(){
   if(!H) return;
   const vw=cam.videoWidth, vh=cam.videoHeight;
-  const positions = [];
   
-  // First pass: calculate all positions
+  // Simply position pins at their true locations - no collision detection
   for(const h of cfg.hotspots){
     const el=pinEls.get(h); if(!el) continue;
     const [u,v]=applyH(H,h.xy_mm[0],h.xy_mm[1]);
     const sm=smooth(pinSmoothed.get(h),[u,v],0.05);
     pinSmoothed.set(h,sm);
-    positions.push({el, x: sm[0], y: sm[1], h});
-  }
-  
-  // Second pass: resolve collisions
-  const minDist = 210; // pixels apart (adjust this to control spacing)
-  for(let i=0; i<positions.length; i++){
-    for(let j=i+1; j<positions.length; j++){
-      const a=positions[i], b=positions[j];
-      const dx=b.x-a.x, dy=b.y-a.y;
-      const dist=Math.sqrt(dx*dx+dy*dy);
-      
-      if(dist < minDist && dist > 0){
-        const push = (minDist-dist)/2;
-        const nx = dx/dist * push, ny = dy/dist * push;
-        a.x -= nx; a.y -= ny; 
-        b.x += nx; b.y += ny;
-      }
-    }
-  }
-  
-  // Third pass: apply final positions
-  for(const p of positions){
-    p.el.style.left=`${(p.x/vw)*100}vw`;
-    p.el.style.top=`${(p.y/vh)*100}vh`;
+    el.style.left=`${(sm[0]/vw)*100}vw`;
+    el.style.top=`${(sm[1]/vh)*100}vh`;
   }
 }
 
