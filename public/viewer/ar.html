@@ -12,12 +12,26 @@
   #msg{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#1118;padding:8px 10px;border:1px solid #1b2028;border-radius:10px;font-size:12px;max-width:92vw;white-space:pre-wrap}
   #pins{position:absolute;inset:0;pointer-events:none}
   
-  /* Pin styles - now starts as a small dot */
+  /* Calibration controls */
+  #calibration{position:fixed;top:50px;left:10px;background:#1118;padding:10px;border:1px solid #1b2028;border-radius:10px;font-size:11px;display:none}
+  #calibration.visible{display:block}
+  #calibration input{width:60px;margin:0 5px}
+  #calibration button{margin-left:10px;padding:2px 8px}
+  
+  /* Pin styles - now starts as a small dot with label */
   .pin{position:absolute;transform:translate(-50%,-50%);pointer-events:auto}
+  
+  /* Container for dot and label */
+  .pin-container{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:2px;
+  }
   
   /* The dot marker */
   .pin-dot{
-    width:16px;height:16px;
+    width:14px;height:14px;
     background:#8cc2ff;
     border:2px solid #fff;
     border-radius:50%;
@@ -34,11 +48,23 @@
     transform:scale(1.1);
   }
   
+  /* Mini label always visible */
+  .pin-label{
+    font-size:9px;
+    color:#fff;
+    text-shadow:0 1px 3px rgba(0,0,0,0.8);
+    white-space:nowrap;
+    pointer-events:none;
+    background:rgba(0,0,0,0.5);
+    padding:1px 4px;
+    border-radius:4px;
+  }
+  
   /* Preview container */
   .pin-preview{
     display:none;
     position:absolute;
-    bottom:calc(100% + 10px);
+    bottom:calc(100% + 20px);
     left:50%;
     transform:translateX(-50%);
     background:#141a22ee;
@@ -48,6 +74,7 @@
     backdrop-filter:blur(4px);
     min-width:110px;
     cursor:pointer;
+    z-index:100;
   }
   .pin-preview.visible{
     display:block;
@@ -79,6 +106,13 @@
   <div id="pins"></div>
   <div id="msg">Allow camera. Aim so 3–4 tags are visible.</div>
   <div id="stats">init…</div>
+  <div id="calibration">
+    <div>Calibration Offset</div>
+    <label>X:<input type="number" id="offsetX" value="0" step="5"></label>
+    <label>Y:<input type="number" id="offsetY" value="0" step="5"></label>
+    <button id="applyOffset">Apply</button>
+    <button id="hideCalib">Hide</button>
+  </div>
 </div>
 <button id="torch" hidden>Torch</button>
 
@@ -92,10 +126,16 @@ addEventListener('unhandledrejection', e => { const m=`Promise error: ${e.reason
 /* ----------- config / paths ----------- */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
-const CFG_URL = `/data/${id}.json?v=13`;  // cache-bust
+const CFG_URL = `/data/${id}.json?v=14`;  // cache-bust
 const APRILTAG_WORKER_URL = '/vendor/apriltag/apriltag.js';
 const APRILTAG_WASM_JS    = '/vendor/apriltag/apriltag_wasm.js';
 const APRILTAG_WASM_BIN   = '/vendor/apriltag/apriltag_wasm.wasm';
+
+// Calibration offsets (persist in localStorage)
+let calibrationOffset = {
+  x: parseFloat(localStorage.getItem('calibOffsetX') || '0'),
+  y: parseFloat(localStorage.getItem('calibOffsetY') || '0')
+};
 
 /* ----------- DOM ----------- */
 const $ = s => document.querySelector(s);
@@ -233,6 +273,7 @@ let H=null;
 const pinEls=new Map(), pinSmoothed=new Map();
 const K_MIN_CENTERS=4;
 let currentExpanded = null; // Track which pin is expanded
+const imagePreloads = []; // Store preloaded images
 
 function updateStats(n){ statsEl.textContent = `${n} tag${n===1?'':'s'}`; }
 function logError(e){ const m=(e && (e.stack||e.message)) || String(e); msgEl.textContent=m; console.error(e); }
@@ -243,6 +284,16 @@ async function init(){
   // ensure at least one demo pin so you see something
   if (!cfg.hotspots || !cfg.hotspots.length) {
     cfg.hotspots = [{ xy_mm: [cfg.map_size_mm[0]/2, cfg.map_size_mm[1]/2], z_mm: 0, label: 'Map center' }];
+  }
+
+  // Preload all images for instant display
+  console.log('Preloading images...');
+  for (const h of cfg.hotspots) {
+    if (h.img && !h.img.match(/\.(mp4|mov|webm|m4v)$/i)) {
+      const img = new Image();
+      img.src = h.img;
+      imagePreloads.push(img);
+    }
   }
 
   detector = await loadAprilTag();
@@ -269,14 +320,23 @@ async function init(){
   const vw=cam.videoWidth, vh=cam.videoHeight, target=Math.min(1280, vw), sc=target/vw;
   work.width=Math.round(vw*sc); work.height=Math.round(vh*sc);
 
-  // Create progressive disclosure pins (dots → preview → fullscreen)
+  // Create progressive disclosure pins with labels visible
   for (const h of cfg.hotspots){
     const el = document.createElement('div'); 
     el.className = 'pin';
     
+    // Container for dot and label
+    const container = document.createElement('div');
+    container.className = 'pin-container';
+    
     // The dot marker
     const dot = document.createElement('div');
     dot.className = 'pin-dot';
+    
+    // Mini label (always visible)
+    const miniLabel = document.createElement('span');
+    miniLabel.className = 'pin-label';
+    miniLabel.textContent = h.label || '';
     
     // Preview container (hidden initially)
     const preview = document.createElement('div');
@@ -335,14 +395,14 @@ async function init(){
     label.textContent = h.label || '';
     preview.appendChild(label);
     
-    // Dot click handler - toggle preview
-    dot.onclick = (e) => {
+    // Dot/container click handler - toggle preview
+    container.onclick = (e) => {
       e.stopPropagation();
       
       // Close any other expanded pin
       if (currentExpanded && currentExpanded !== preview) {
         currentExpanded.classList.remove('visible');
-        currentExpanded.previousSibling.classList.remove('expanded');
+        currentExpanded.parentElement.querySelector('.pin-dot').classList.remove('expanded');
       }
       
       // Toggle this pin
@@ -358,7 +418,9 @@ async function init(){
       }
     };
     
-    el.appendChild(dot);
+    container.appendChild(dot);
+    container.appendChild(miniLabel);
+    el.appendChild(container);
     el.appendChild(preview);
     pinsEl.appendChild(el); 
     pinEls.set(h, el);
@@ -368,13 +430,47 @@ async function init(){
   document.addEventListener('click', () => {
     if (currentExpanded) {
       currentExpanded.classList.remove('visible');
-      currentExpanded.previousSibling.classList.remove('expanded');
+      currentExpanded.parentElement.querySelector('.pin-dot').classList.remove('expanded');
       currentExpanded = null;
     }
   });
 
+  // Setup calibration controls
+  setupCalibrationControls();
+
   msgEl.textContent='Aim so 3–4 tags are visible';
   requestAnimationFrame(loop);
+}
+
+function setupCalibrationControls() {
+  const calibDiv = $('#calibration');
+  const offsetXInput = $('#offsetX');
+  const offsetYInput = $('#offsetY');
+  const applyBtn = $('#applyOffset');
+  const hideBtn = $('#hideCalib');
+
+  // Load saved offsets
+  offsetXInput.value = calibrationOffset.x;
+  offsetYInput.value = calibrationOffset.y;
+
+  // Show calibration panel with 'C' key
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'c' || e.key === 'C') {
+      calibDiv.classList.toggle('visible');
+    }
+  });
+
+  applyBtn.onclick = () => {
+    calibrationOffset.x = parseFloat(offsetXInput.value) || 0;
+    calibrationOffset.y = parseFloat(offsetYInput.value) || 0;
+    localStorage.setItem('calibOffsetX', calibrationOffset.x);
+    localStorage.setItem('calibOffsetY', calibrationOffset.y);
+    console.log('Applied offset:', calibrationOffset);
+  };
+
+  hideBtn.onclick = () => {
+    calibDiv.classList.remove('visible');
+  };
 }
 
 function gatherCenters(list, sx, sy){
@@ -389,6 +485,7 @@ function gatherCenters(list, sx, sy){
     tagImage.push([u/sx, v/sy]);
   }
 }
+
 function gatherOneTagCorners(list, sx, sy){
   // Fallback: use the first tag's corners (gives 4 points)
   tagWorld.length=0; tagImage.length=0;
@@ -408,14 +505,36 @@ function layoutPins(){
   if(!H) return;
   const vw=cam.videoWidth, vh=cam.videoHeight;
   
-  // Simply position pins at their true locations - no collision detection
+  // Apply calibration offsets to correct systematic errors
   for(const h of cfg.hotspots){
     const el=pinEls.get(h); if(!el) continue;
-    const [u,v]=applyH(H,h.xy_mm[0],h.xy_mm[1]);
+    
+    // Apply offset BEFORE projection
+    const [u,v]=applyH(H, h.xy_mm[0] + calibrationOffset.x, h.xy_mm[1] + calibrationOffset.y);
     const sm=smooth(pinSmoothed.get(h),[u,v],0.05);
     pinSmoothed.set(h,sm);
     el.style.left=`${(sm[0]/vw)*100}vw`;
     el.style.top=`${(sm[1]/vh)*100}vh`;
+  }
+}
+
+// Debug function for corner visualization
+let debugLogged = false;
+function debugMapCorners(H) {
+  if (!debugLogged && H) {
+    debugLogged = true;
+    const corners = [
+      [0, 0],           // bottom-left
+      [435, 0],         // bottom-right  
+      [435, 432],       // top-right
+      [0, 432]          // top-left
+    ];
+    console.log('=== Map Corner Projections ===');
+    corners.forEach((c, i) => {
+      const [u,v] = applyH(H, c[0], c[1]);
+      console.log(`Corner ${i}: Map(${c[0]},${c[1]}) → Screen(${u.toFixed(0)},${v.toFixed(0)})`);
+    });
+    console.log('If corners don\'t align with physical map, adjust offset with C key');
   }
 }
 
@@ -431,9 +550,13 @@ async function loop(){
     gatherCenters(dets, sx, sy);
     if (tagWorld.length >= K_MIN_CENTERS) {
       H = computeHomography(tagWorld, tagImage);
+      debugMapCorners(H); // Log once for debugging
     } else {
       gatherOneTagCorners(dets, sx, sy);
-      if (tagWorld.length === 4) H = computeHomography(tagWorld, tagImage);
+      if (tagWorld.length === 4) {
+        H = computeHomography(tagWorld, tagImage);
+        debugMapCorners(H);
+      }
     }
 
     if (H){
