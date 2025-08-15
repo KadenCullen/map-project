@@ -45,9 +45,9 @@
   }
   #calibration{
     position:fixed;left:10px;top:50px;z-index:1001;background:#1118;color:#e7eaee;
-    border:1px solid #1b2028;border-radius:10px;padding:10px;font-size:11px;display:none;pointer-events:auto
+    border:1px solid #1b2028;border-radius:10px;padding:10px;font-size:11px;display:none;pointer-events:auto;min-width:240px
   }
-  #calibration input{width:70px;margin:0 6px}
+  #calibration input{width:80px;margin:0 6px}
   #calibHUD{
     position:fixed;right:10px;top:10px;z-index:1001;background:#1118;border:1px solid #1b2028;
     border-radius:10px;padding:6px 8px;font-size:11px;pointer-events:none
@@ -71,6 +71,7 @@
   <div style="margin-bottom:6px">Calibration (mm)</div>
   <label>X:<input type="number" id="offsetX" value="0" step="1"></label>
   <label>Y:<input type="number" id="offsetY" value="0" step="1"></label>
+  <label>+Y nudge:<input type="number" id="extraY" value="0" step="1" title="Additional Y shift (mm) converted via H"></label>
   <div style="margin-top:8px">
     <button id="applyOffset" style="padding:2px 8px">Apply</button>
     <button id="resetOffset" style="padding:2px 8px;margin-left:6px">Reset</button>
@@ -90,7 +91,7 @@ addEventListener('unhandledrejection', e => { const m=`Promise error: ${e.reason
 /* ------------ config / paths ------------ */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
-const CFG_URL = `/data/${id}.json?v=21`;  // cache-bust
+const CFG_URL = `/data/${id}.json?v=17`;  // cache-bust
 const APRILTAG_WORKER_URL = '/vendor/apriltag/apriltag.js';
 const APRILTAG_WASM_JS    = '/vendor/apriltag/apriltag_wasm.js';
 const APRILTAG_WASM_BIN   = '/vendor/apriltag/apriltag_wasm.wasm';
@@ -104,17 +105,19 @@ const wctx = work.getContext('2d', { willReadFrequently: true });
 /* ------------ state ------------ */
 let cfg, detector, stream, track;
 const tagWorld=[], tagImage=[];
-let H=null, lastGoodH=null, lastErr=Infinity;
-let mode='init';
+let H=null;
 const pinEls=new Map(), pinSmoothed=new Map();
+const K_MIN_CENTERS=4;
+let currentExpanded = null;
 let SMOOTH_ALPHA = 0.05;
 const imagePreloads = [];
 
-/* calibration values (mm), persisted */
+/* panel overrides (local, per-device) */
 let calibrationOffset = {
-  x: parseFloat(localStorage.getItem('calibOffsetX') || '0'),
-  y: parseFloat(localStorage.getItem('calibOffsetY') || '0')
+  x: parseFloat(localStorage.getItem('calibOffsetX') ?? 'NaN'),
+  y: parseFloat(localStorage.getItem('calibOffsetY') ?? 'NaN')
 };
+let EXTRA_Y_MM = parseFloat(localStorage.getItem('extraYmm') ?? 'NaN');
 
 /* ------------ helpers ------------ */
 async function loadJSON(url){
@@ -142,149 +145,59 @@ async function loadAprilTag(){
   return detector;
 }
 
-/* ------------ math utils (robust homography) ------------ */
-function mul3x3(A,B){ // row-major 3x3 Float64Array(9)
-  const C=new Float64Array(9);
-  for(let r=0;r<3;r++) for(let c=0;c<3;c++){
-    C[r*3+c]=A[r*3+0]*B[0*3+c]+A[r*3+1]*B[1*3+c]+A[r*3+2]*B[2*3+c];
+/* ------------ math ------------ */
+function computeHomography(world, image){
+  const A = [], b = [];
+  for (let i = 0; i < world.length; i++){
+    const [X, Y] = world[i], [u, v] = image[i];
+    A.push([X, Y, 1, 0, 0, 0, -u*X, -u*Y]); b.push(u);
+    A.push([0, 0, 0, X, Y, 1, -v*X, -v*Y]); b.push(v);
   }
-  return C;
-}
-function det3x3(M){
-  const a=M[0], b=M[1], c=M[2], d=M[3], e=M[4], f=M[5], g=M[6], h=M[7], i=M[8];
-  return a*(e*i-f*h) - b*(d*i-f*g) + c*(d*h-e*g);
-}
-function inv3x3(M){
-  const a=M[0], b=M[1], c=M[2], d=M[3], e=M[4], f=M[5], g=M[6], h=M[7], i=M[8];
-  const A =  (e*i - f*h), B = -(b*i - c*h), C =  (b*f - c*e);
-  const D = -(d*i - f*g), E =  (a*i - c*g), F = -(a*f - c*d);
-  const G =  (d*h - e*g), H = -(a*h - b*g), I =  (a*e - b*d);
-  const det = a*A + b*D + c*G; // same as det3x3
-  const invDet = 1/(det || 1e-12);
-  return new Float64Array([A*invDet, B*invDet, C*invDet, D*invDet, E*invDet, F*invDet, G*invDet, H*invDet, I*invDet]);
+  const n = 8, m = A.length;
+  const AtA = Array.from({length:n}, () => new Float64Array(n));
+  const Atb = new Float64Array(n);
+
+  for (let r = 0; r < m; r++){
+    const R = A[r], br = b[r];
+    for (let i = 0; i < n; i++){
+      Atb[i] += R[i] * br;
+      for (let j = 0; j < n; j++) AtA[i][j] += R[i] * R[j];
+    }
+  }
+
+  function chol(AtA, Atb){
+    const n = AtA.length;
+    const L = Array.from({length:n}, () => new Float64Array(n));
+    for (let i = 0; i < n; i++){
+      for (let j = 0; j <= i; j++){
+        let s = AtA[i][j];
+        for (let k = 0; k < j; k++) s -= L[i][k] * L[j][k];
+        L[i][j] = (i === j) ? Math.sqrt(Math.max(s, 1e-12)) : s / L[j][j];
+      }
+    }
+    const y = new Float64Array(n);
+    for (let i = 0; i < n; i++){
+      let s = Atb[i];
+      for (let k = 0; k < i; k++) s -= L[i][k] * y[k];
+      y[i] = s / L[i][i];
+    }
+    const x = new Float64Array(n);
+    for (let i = n - 1; i >= 0; i--){
+      let s = y[i];
+      for (let k = i + 1; k < n; k++) s -= L[k][i] * x[k];
+      x[i] = s / L[i][i];
+    }
+    return x;
+  }
+
+  const h = chol(AtA, Atb);
+  return new Float64Array([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1]);
 }
 function applyH(H,X,Y){
   const u=H[0]*X+H[1]*Y+H[2], v=H[3]*X+H[4]*Y+H[5], w=H[6]*X+H[7]*Y+H[8];
-  return [u/w, v/w];
+  return [u/w,v/w];
 }
 function smooth(prev,next,alpha){ return !prev ? next : [prev[0]*(1-alpha)+next[0]*alpha, prev[1]*(1-alpha)+next[1]*alpha]; }
-
-function normalize2D(pts){
-  const n=pts.length; if(!n) return {T:new Float64Array([1,0,0, 0,1,0, 0,0,1]), pts:[]};
-  let mx=0,my=0; for(const [x,y] of pts){ mx+=x; my+=y; } mx/=n; my/=n;
-  let meanDist=0; for(const [x,y] of pts){ meanDist += Math.hypot(x-mx,y-my); }
-  meanDist/=n; const s = Math.SQRT2 / (meanDist || 1);
-  const T = new Float64Array([s,0,-s*mx, 0,s,-s*my, 0,0,1]);
-  const np = pts.map(([x,y]) => [s*x - s*mx, s*y - s*my]);
-  return {T, pts:np};
-}
-
-function dltHomography(world,image){
-  const A=[], b=[];
-  for (let i=0;i<world.length;i++){
-    const [X,Y]=world[i], [u,v]=image[i];
-    A.push([X,Y,1, 0,0,0, -u*X,-u*Y]); b.push(u);
-    A.push([0,0,0, X,Y,1, -v*X,-v*Y]); b.push(v);
-  }
-  const n=8, m=A.length;
-  const AtA=Array.from({length:n},()=>new Float64Array(n));
-  const Atb=new Float64Array(n);
-  for (let r=0;r<m;r++){
-    const R=A[r], br=b[r];
-    for (let i=0;i<n;i++){
-      Atb[i]+=R[i]*br;
-      for (let j=0;j<n;j++) AtA[i][j]+=R[i]*R[j];
-    }
-  }
-  // Cholesky
-  const L=Array.from({length:n},()=>new Float64Array(n));
-  for (let i=0;i<n;i++){
-    for (let j=0;j<=i;j++){
-      let s=AtA[i][j];
-      for (let k=0;k<j;k++) s-=L[i][k]*L[j][k];
-      L[i][j]=(i===j)?Math.sqrt(Math.max(s,1e-12)):s/L[j][j];
-    }
-  }
-  const y=new Float64Array(n);
-  for (let i=0;i<n;i++){
-    let s=Atb[i]; for (let k=0;k<i;k++) s-=L[i][k]*y[k]; y[i]=s/L[i][i];
-  }
-  const x=new Float64Array(n);
-  for (let i=n-1;i>=0;i--){
-    let s=y[i]; for (let k=i+1;k<n;k++) s-=L[k][i]*x[k]; x[i]=s/L[i][i];
-  }
-  return new Float64Array([x[0],x[1],x[2], x[3],x[4],x[5], x[6],x[7], 1]);
-}
-function denormHomography(Hn, Tsrc, Tdst){ // H = Tdst^-1 * Hn * Tsrc
-  const TdInv = inv3x3(Tdst);
-  return mul3x3(mul3x3(TdInv, Hn), Tsrc);
-}
-function proj(H, [X,Y]){ return applyH(H,X,Y); }
-function rmse(H, world, image){
-  let s=0; for(let k=0;k<world.length;k++){
-    const [pu,pv]=proj(H, world[k]); const [u,v]=image[k];
-    const du=pu-u, dv=pv-v; s += du*du + dv*dv;
-  }
-  return Math.sqrt(s / Math.max(1, world.length));
-}
-
-function robustHomography(world, image){
-  if (world.length < 4) return {H:null, rmse:Infinity};
-
-  // Normalize both sets
-  const nW = normalize2D(world);
-  const nI = normalize2D(image);
-
-  // Build up to first 100 4-point subsets
-  const idx = [...world.keys()];
-  const subsets = [];
-  for (let a=0;a<idx.length-3;a++)
-    for (let b=a+1;b<idx.length-2;b++)
-      for (let c=b+1;c<idx.length-1;c++)
-        for (let d=c+1;d<idx.length;d++)
-          subsets.push([a,b,c,d]);
-  // shuffle & cap
-  for (let i=subsets.length-1;i>0;i--){
-    const j=(Math.random()*(i+1))|0; [subsets[i],subsets[j]]=[subsets[j],subsets[i]];
-  }
-  subsets.length = Math.min(subsets.length, 100);
-
-  let bestH=null, bestErr=Infinity;
-
-  for (const s of subsets){
-    const W4 = s.map(i => nW.pts[i]), I4 = s.map(i => nI.pts[i]);
-    const Hn = dltHomography(W4, I4);
-    const Hc = denormHomography(Hn, nW.T, nI.T);
-
-    // inlier selection (~8 px threshold)
-    const inliers=[];
-    for (let k=0;k<world.length;k++){
-      const [pu,pv]=proj(Hc, world[k]);
-      const [u,v]=image[k];
-      if (Math.hypot(pu-u,pv-v) < 8) inliers.push(k);
-    }
-    if (inliers.length < 4) continue;
-
-    // refine on inliers
-    const Wr = inliers.map(i => world[i]);
-    const Ir = inliers.map(i => image[i]);
-    const nWr = normalize2D(Wr), nIr = normalize2D(Ir);
-    const Hr = dltHomography(nWr.pts, nIr.pts);
-    const Hc2 = denormHomography(Hr, nWr.T, nIr.T);
-    const e = rmse(Hc2, Wr, Ir);
-    if (e < bestErr){ bestErr=e; bestH=Hc2; }
-  }
-
-  // fallback: normalized DLT over all
-  if (!bestH){
-    const nW0 = normalize2D(world), nI0 = normalize2D(image);
-    const Hn = dltHomography(nW0.pts, nI0.pts);
-    bestH = denormHomography(Hn, nW0.T, nI0.T);
-    bestErr = rmse(bestH, world, image);
-  }
-
-  return {H:bestH, rmse:bestErr};
-}
 
 /* detection normalization */
 function normalizeDetections(d){
@@ -326,42 +239,50 @@ const centerOf = corners => {
   const [a,b,c,d] = corners; return [(a[0]+b[0]+c[0]+d[0])/4, (a[1]+b[1]+c[1]+d[1])/4];
 }
 
-/* pairing — centers primary; if <4 centers, use ALL corners from visible tags */
-function gatherCenterPairs(dets, sx, sy){
-  tagWorld.length=0; tagImage.length=0;
-  const lut=new Map(cfg.apriltags.map(t=>[t.id,t]));
-  for(const d of normalizeDetections(dets)){
-    const id=getId(d); const t=lut.get(id); if(!t) continue;
-    const corners=getCorners(d); if(!corners) continue;
-    const [u,v]=centerOf(corners);
-    tagWorld.push([t.center_xy_mm[0], t.center_xy_mm[1]]);
-    tagImage.push([u/sx, v/sy]);
-  }
-  return tagWorld.length;
+/* ------------ calibration merging ------------ */
+// JSON defaults + local panel overrides
+function getCal() {
+  const cal = (cfg && cfg.calibration) ? cfg.calibration : {};
+  const jsonOx = Array.isArray(cal.offset_mm) ? Number(cal.offset_mm[0]) : 0;
+  const jsonOy = Array.isArray(cal.offset_mm) ? Number(cal.offset_mm[1]) : 0;
+  const jsonSx = Array.isArray(cal.scale_mm)  ? Number(cal.scale_mm[0])  : 1;
+  const jsonSy = Array.isArray(cal.scale_mm)  ? Number(cal.scale_mm[1])  : 1;
+  const jsonExtraY = Number.isFinite(cal.extra_y_mm) ? Number(cal.extra_y_mm) : 0;
+  const jsonSmooth = Number.isFinite(cal.smooth_alpha) ? Number(cal.smooth_alpha) : 0.05;
+
+  const ux = calibrationOffset.x;
+  const uy = calibrationOffset.y;
+  const uExtraY = EXTRA_Y_MM;
+
+  const ox = Number.isFinite(ux) ? ux : jsonOx;
+  const oy = Number.isFinite(uy) ? uy : jsonOy;
+  const extraY = Number.isFinite(uExtraY) ? uExtraY : jsonExtraY;
+
+  return { sxmm: jsonSx, symm: jsonSy, oxmm: ox, oymm: oy, extraYmm: extraY, smooth: jsonSmooth, debug: !!cal.debug };
 }
-function gatherCornersFromAllVisibleTags(dets, sx, sy){
-  tagWorld.length=0; tagImage.length=0;
-  const lut=new Map(cfg.apriltags.map(t=>[t.id,t]));
-  for(const d of normalizeDetections(dets)){
-    const id=getId(d); const t=lut.get(id); if(!t) continue;
-    const corners=getCorners(d); if(!corners) continue;
-    const s=t.size_mm/2, wx=t.center_xy_mm[0], wy=t.center_xy_mm[1];
-    const world=[[wx-s,wy+s],[wx+s,wy+s],[wx+s,wy-s],[wx-s,wy-s]];
-    const image=corners.map(([u,v])=>[u/sx, v/sy]);
-    for(let i=0;i<4;i++){ tagWorld.push(world[i]); tagImage.push(image[i]); }
-  }
-  return tagWorld.length;
+function clearLocalCalibration() {
+  localStorage.removeItem('calibOffsetX');
+  localStorage.removeItem('calibOffsetY');
+  localStorage.removeItem('extraYmm');
+  calibrationOffset.x = NaN;
+  calibrationOffset.y = NaN;
+  EXTRA_Y_MM = NaN;
 }
 
 /* ------------ init ------------ */
-function updateStats(n){ statsEl.textContent = `${n} tag${n===1?'':'s'} | ${mode}${lastGoodH?` | rmse ${lastErr.toFixed(1)}px`:''}`; }
+function updateStats(n){ statsEl.textContent = `${n} tag${n===1?'':'s'}`; }
 
 async function init(){
+  if (params.get('clearcal') === '1') {
+    clearLocalCalibration();
+    // strip the param and continue
+    const url = new URL(location.href); url.searchParams.delete('clearcal'); history.replaceState({}, '', url.toString());
+  }
+
   cfg = await loadJSON(CFG_URL);
 
-  if (cfg.calibration && Number.isFinite(cfg.calibration.smooth_alpha)) {
-    SMOOTH_ALPHA = cfg.calibration.smooth_alpha;
-  }
+  // merged smoothing default
+  SMOOTH_ALPHA = getCal().smooth;
 
   if (!cfg.hotspots || !cfg.hotspots.length) {
     cfg.hotspots = [{ xy_mm: [cfg.map_size_mm[0]/2, -cfg.map_size_mm[1]/2], z_mm: 0, label: 'Map center' }];
@@ -432,15 +353,15 @@ async function init(){
     // toggle preview
     stack.onclick = (e) => {
       e.stopPropagation();
-      if (window.currentExpanded && window.currentExpanded !== preview) {
-        window.currentExpanded.classList.remove('visible');
-        window.currentExpanded.previousSibling.querySelector('.pin-dot')?.classList.remove('expanded');
+      if (currentExpanded && currentExpanded !== preview) {
+        currentExpanded.classList.remove('visible');
+        currentExpanded.previousSibling.querySelector('.pin-dot')?.classList.remove('expanded');
       }
       const isOpen = preview.classList.contains('visible');
       if (isOpen) {
-        preview.classList.remove('visible'); dot.classList.remove('expanded'); window.currentExpanded = null;
+        preview.classList.remove('visible'); dot.classList.remove('expanded'); currentExpanded = null;
       } else {
-        preview.classList.add('visible'); dot.classList.add('expanded'); window.currentExpanded = preview;
+        preview.classList.add('visible'); dot.classList.add('expanded'); currentExpanded = preview;
       }
     };
 
@@ -449,10 +370,10 @@ async function init(){
   }
 
   document.addEventListener('click', () => {
-    if (window.currentExpanded) {
-      window.currentExpanded.classList.remove('visible');
-      window.currentExpanded.previousSibling.querySelector('.pin-dot')?.classList.remove('expanded');
-      window.currentExpanded = null;
+    if (currentExpanded) {
+      currentExpanded.classList.remove('visible');
+      currentExpanded.previousSibling.querySelector('.pin-dot')?.classList.remove('expanded');
+      currentExpanded = null;
     }
   });
 
@@ -473,30 +394,56 @@ function showFullscreenImage(src, label) {
   overlay.appendChild(img); overlay.appendChild(caption); document.body.appendChild(overlay);
 }
 
-/* layout: JSON calibration (mm) + panel offsets (mm) */
+/* tag pairing */
+function gatherCenters(list, sx, sy){
+  tagWorld.length=0; tagImage.length=0;
+  const lut=new Map(cfg.apriltags.map(t=>[t.id,t]));
+  for(const d of normalizeDetections(list)){
+    const id=getId(d); const t=lut.get(id); if(!t) continue;
+    const corners=getCorners(d); if(!corners) continue;
+    const [u,v]=centerOf(corners);
+    tagWorld.push([t.center_xy_mm[0], t.center_xy_mm[1]]);
+    tagImage.push([u/sx, v/sy]);
+  }
+}
+function gatherOneTagCorners(list, sx, sy){
+  tagWorld.length=0; tagImage.length=0;
+  const lut=new Map(cfg.apriltags.map(t=>[t.id,t]));
+  for(const d of normalizeDetections(list)){
+    const id=getId(d); const t=lut.get(id); if(!t) continue;
+    const corners=getCorners(d); if(!corners) continue;
+    const s=t.size_mm/2, wx=t.center_xy_mm[0], wy=t.center_xy_mm[1];
+    const world=[[wx-s,wy+s],[wx+s,wy+s],[wx+s,wy-s],[wx-s,wy-s]];
+    const image=corners.map(([u,v])=>[u/sx, v/sy]);
+    for(let i=0;i<4;i++){ tagWorld.push(world[i]); tagImage.push(image[i]); }
+    break;
+  }
+}
+
+/* layout: apply calibration in mm (JSON defaults + panel overrides) */
 function layoutPins(){
   if(!H) return;
   const vw=cam.videoWidth, vh=cam.videoHeight;
 
-  const cal = (cfg && cfg.calibration) ? cfg.calibration : null;
-  const sxmm = cal?.scale_mm?.[0] ?? 1;
-  const symm = cal?.scale_mm?.[1] ?? 1;
-  const oxmm = cal?.offset_mm?.[0] ?? 0;
-  const oymm = cal?.offset_mm?.[1] ?? 0;
-
-  const uxmm = calibrationOffset.x || 0;
-  const uymm = calibrationOffset.y || 0;
+  const { sxmm, symm, oxmm, oymm, extraYmm } = getCal();
 
   for(const h of cfg.hotspots){
     const el = pinEls.get(h); if(!el) continue;
 
-    // world-space adjustments in mm
-    const Xw = h.xy_mm[0] * sxmm + oxmm + uxmm;
-    const Yw = h.xy_mm[1] * symm + oymm + uymm;
+    // 1) world-space (mm): scale + offset
+    const Xw = h.xy_mm[0] * sxmm + oxmm;
+    const Yw = h.xy_mm[1] * symm + oymm;
 
-    // project
+    // 2) project
     let [u,v]=applyH(H, Xw, Yw);
 
+    // 3) extra Y in mm → pixels via local Jacobian
+    if (extraYmm) {
+      const [, v2] = applyH(H, Xw, Yw + 1);  // 1 mm step in Y
+      v += (v2 - v) * extraYmm;
+    }
+
+    // 4) smooth & place
     const sm=smooth(pinSmoothed.get(h),[u,v],SMOOTH_ALPHA);
     pinSmoothed.set(h,sm);
     el.style.left=`${(sm[0]/vw)*100}vw`;
@@ -504,7 +451,26 @@ function layoutPins(){
   }
 }
 
-/* main loop with robust solve + gating */
+/* optional: corner debug (neg Y up, i.e., top = -map_height) */
+let debugLogged = false;
+function debugMapCorners() {
+  const cal = getCal();
+  if (debugLogged || !(cfg?.calibration?.debug)) return;
+  debugLogged = true;
+  const corners = [
+    [0, 0],                                        // bottom-left
+    [cfg.map_size_mm[0], 0],                       // bottom-right
+    [cfg.map_size_mm[0], -cfg.map_size_mm[1]],     // top-right
+    [0, -cfg.map_size_mm[1]]                       // top-left
+  ];
+  console.log('=== Map Corner Projections (neg Y up) ===');
+  corners.forEach((c, i) => {
+    const [u,v] = applyH(H, c[0]*cal.sxmm+cal.oxmm, c[1]*cal.symm+cal.oymm);
+    console.log(`Corner ${i}: Map(${c[0]},${c[1]}) → Screen(${u.toFixed(0)}, ${v.toFixed(0)})`);
+  });
+}
+
+/* main loop */
 async function loop(){
   try{
     wctx.drawImage(cam,0,0,work.width,work.height);
@@ -513,24 +479,20 @@ async function loop(){
     const dets=await detector.detect(gray, work.width, work.height);
 
     const sx=cam.videoWidth/work.width, sy=cam.videoHeight/work.height;
-
-    // Build correspondences
-    const seenCenters = gatherCenterPairs(dets, sx, sy);
-    mode = 'centers';
-    if (seenCenters < 4) {
-      const seenCorners = gatherCornersFromAllVisibleTags(dets, sx, sy);
-      mode = (seenCorners >= 4) ? 'corners' : 'insufficient';
-    }
-
-    if (mode !== 'insufficient'){
-      const {H:Hp, rmse:err} = robustHomography(tagWorld, tagImage);
-      const GOOD = Hp && Number.isFinite(Hp[0]) && Number.isFinite(Hp[8]) && err < 6.0; // ~6px gate
-      if (GOOD){
-        lastGoodH = Hp; lastErr = err;
-      }
-      H = lastGoodH || null;
+    gatherCenters(dets, sx, sy);
+    if (tagWorld.length >= K_MIN_CENTERS) {
+      H = computeHomography(tagWorld, tagImage);
+      if (!Number.isFinite(H[0]) || !Number.isFinite(H[8])) H = null;
+      if (H) debugMapCorners();
     } else {
-      H = lastGoodH || null;
+      gatherOneTagCorners(dets, sx, sy);
+      if (tagWorld.length === 4) {
+        H = computeHomography(tagWorld, tagImage);
+        if (!Number.isFinite(H[0]) || !Number.isFinite(H[8])) H = null;
+        if (H) debugMapCorners();
+      } else {
+        H = null;
+      }
     }
 
     if (H){
@@ -549,25 +511,31 @@ async function loop(){
   requestAnimationFrame(loop);
 }
 
-/* calibration UI (persisted) */
+/* calibration UI wiring */
 function setupCalibrationControls() {
   const toggleBtn = document.getElementById('calibToggle');
   const panel     = document.getElementById('calibration');
   const offsetX   = document.getElementById('offsetX');
   const offsetY   = document.getElementById('offsetY');
+  const extraY    = document.getElementById('extraY');
   const applyBtn  = document.getElementById('applyOffset');
   const resetBtn  = document.getElementById('resetOffset');
   const hideBtn   = document.getElementById('hideCalib');
   const hud       = document.getElementById('calibHUD');
 
-  offsetX.value = calibrationOffset.x;
-  offsetY.value = calibrationOffset.y;
+  // initial inputs = merged values (so the panel shows what’s active)
+  const merged = getCal();
+  offsetX.value = merged.oxmm;
+  offsetY.value = merged.oymm;
+  extraY.value  = merged.extraYmm;
 
+  // toggle
   toggleBtn.onclick = () => {
     panel.style.display = (panel.style.display === 'none' || !panel.style.display) ? 'block' : 'none';
   };
   if (params.get('calib') === '1') panel.style.display = 'block';
 
+  // 'C' key
   document.addEventListener('keydown', (e) => {
     if (e.key === 'c' || e.key === 'C') {
       panel.style.display = (panel.style.display === 'none' || !panel.style.display) ? 'block' : 'none';
@@ -575,26 +543,32 @@ function setupCalibrationControls() {
   });
 
   const updateHUD = () => {
-    hud.textContent = `calib (mm): X=${(calibrationOffset.x||0).toFixed(1)}, Y=${(calibrationOffset.y||0).toFixed(1)} | smooth=${SMOOTH_ALPHA}`;
+    const c = getCal();
+    hud.textContent = `calib (mm): X=${c.oxmm.toFixed(1)} Y=${c.oymm.toFixed(1)} | +Y=${c.extraYmm.toFixed(1)} | smooth=${SMOOTH_ALPHA}`;
   };
   updateHUD();
 
   applyBtn.onclick = () => {
     const x = parseFloat(offsetX.value);
     const y = parseFloat(offsetY.value);
-    calibrationOffset.x = Number.isFinite(x) ? x : 0;
-    calibrationOffset.y = Number.isFinite(y) ? y : 0;
-    localStorage.setItem('calibOffsetX', calibrationOffset.x);
-    localStorage.setItem('calibOffsetY', calibrationOffset.y);
+    const ey = parseFloat(extraY.value);
+    // save as panel overrides
+    localStorage.setItem('calibOffsetX', Number.isFinite(x) ? x : 0);
+    localStorage.setItem('calibOffsetY', Number.isFinite(y) ? y : 0);
+    localStorage.setItem('extraYmm',     Number.isFinite(ey) ? ey : 0);
+    // refresh local vars (used by getCal)
+    calibrationOffset.x = Number.isFinite(x) ? x : NaN;
+    calibrationOffset.y = Number.isFinite(y) ? y : NaN;
+    EXTRA_Y_MM = Number.isFinite(ey) ? ey : NaN;
     updateHUD();
   };
 
   resetBtn.onclick = () => {
-    calibrationOffset.x = 0;
-    calibrationOffset.y = 0;
-    offsetX.value = 0; offsetY.value = 0;
-    localStorage.removeItem('calibOffsetX');
-    localStorage.removeItem('calibOffsetY');
+    clearLocalCalibration();   // reverts to JSON defaults
+    const c = getCal();
+    offsetX.value = c.oxmm;
+    offsetY.value = c.oymm;
+    extraY.value  = c.extraYmm;
     updateHUD();
   };
 
