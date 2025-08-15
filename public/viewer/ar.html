@@ -87,9 +87,16 @@
 
 <script type="module">
 /* ------------ errors ------------ */
-addEventListener('error', e => { const m=`JS error: ${e.message}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
-addEventListener('unhandledrejection', e => { const m=`Promise error: ${e.reason?.message ?? e.reason}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
-
+addEventListener('error', e => {
+  const n = document.getElementById('msg');
+  if (n) n.textContent = 'Tracking error — see console for details.';
+  console.error('Unhandled error:', e.error || e);
+});
+addEventListener('unhandledrejection', e => {
+  const n = document.getElementById('msg');
+  if (n) n.textContent = 'Tracking promise error — see console for details.';
+  console.error('Unhandled promise rejection:', e.reason);
+});
 /* ------------ config / paths ------------ */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
