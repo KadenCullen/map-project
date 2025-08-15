@@ -9,7 +9,7 @@
     { "id": 103, "center_xy_mm": [217.4, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
     { "id": 104, "center_xy_mm": [297.4, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
     { "id": 105, "center_xy_mm": [377.4, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
-    { "id": 106, "center_xy_mm": [337.4, -60], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
+    { "id": 106, "center_xy_mm": [-12, -150], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
     { "id": 175, "center_xy_mm": [97.4, -60], "size_mm": 23.5, "rpy_deg": [0, 0, 0] }
  
   ],
