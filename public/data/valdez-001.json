@@ -34,5 +34,6 @@
     "scale_mm":  [ 1.00, 1.05 ], // gentle Y scale if top/bottom drift (1.00–1.10 range)
     "smooth_alpha": 0.05,      // 0.01–0.10; lower = steadier, slower
     "debug": true              // shows projected map corners in px
+  }
   ]
 }
