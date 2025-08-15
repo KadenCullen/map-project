@@ -505,12 +505,22 @@ function layoutPins(){
   if(!H) return;
   const vw=cam.videoWidth, vh=cam.videoHeight;
   
-  // Apply calibration offsets to correct systematic errors
   for(const h of cfg.hotspots){
     const el=pinEls.get(h); if(!el) continue;
     
-    // Apply offset BEFORE projection
-    const [u,v]=applyH(H, h.xy_mm[0] + calibrationOffset.x, h.xy_mm[1] + calibrationOffset.y);
+    // Apply homography
+    let [u,v]=applyH(H, h.xy_mm[0], h.xy_mm[1]);
+    
+    // Manual corrections for your specific setup
+    // These values compensate for the distortion
+    const yCorrection = (h.xy_mm[1] + 216) * 0.3; // More correction as we go up
+    v = v + yCorrection;
+    
+    // Scale correction - pins spread out too much horizontally at top
+    const centerX = vw/2;
+    const xCorrection = (u - centerX) * (1 - (h.xy_mm[1] + 216)/432 * 0.2);
+    u = centerX + xCorrection;
+    
     const sm=smooth(pinSmoothed.get(h),[u,v],0.05);
     pinSmoothed.set(h,sm);
     el.style.left=`${(sm[0]/vw)*100}vw`;
