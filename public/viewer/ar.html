@@ -12,7 +12,7 @@
   #msg{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#1118;padding:8px 10px;border:1px solid #1b2028;border-radius:10px;font-size:12px;max-width:92vw;white-space:pre-wrap}
   #pins{position:absolute;inset:0;pointer-events:none}
 
-  /* Pins: progressive dots with preview */
+  /* Pins: dot + label + preview */
   .pin{position:absolute;transform:translate(-50%,-50%);pointer-events:auto;will-change:left,top,transform}
   .pin .stack{display:flex;flex-direction:column;align-items:center;gap:2px}
   .pin-dot{
@@ -82,9 +82,7 @@
 
 <button id="torch" hidden>Torch</button>
 
-<!-- Comlink for worker RPC -->
 <script src="https://unpkg.com/comlink/dist/umd/comlink.js"></script>
-
 <script type="module">
 /* ------------ errors ------------ */
 addEventListener('error', e => { const m=`JS error: ${e.message}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
@@ -93,7 +91,7 @@ addEventListener('unhandledrejection', e => { const m=`Promise error: ${e.reason
 /* ------------ config / paths ------------ */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
-const CFG_URL = `/data/${id}.json?v=15`;  // cache-bust
+const CFG_URL = `/data/${id}.json?v=16`;  // cache-bust
 const APRILTAG_WORKER_URL = '/vendor/apriltag/apriltag.js';
 const APRILTAG_WASM_JS    = '/vendor/apriltag/apriltag_wasm.js';
 const APRILTAG_WASM_BIN   = '/vendor/apriltag/apriltag_wasm.wasm';
@@ -146,6 +144,8 @@ async function loadAprilTag(){
   await detector.set_max_detections(0);
   return detector;
 }
+
+/* ------------ math ------------ */
 function computeHomography(world, image){
   const A = [], b = [];
   for (let i = 0; i < world.length; i++){
@@ -199,6 +199,11 @@ function computeHomography(world, image){
   const h = chol(AtA, Atb);
   return new Float64Array([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1]);
 }
+function applyH(H,X,Y){
+  const u=H[0]*X+H[1]*Y+H[2], v=H[3]*X+H[4]*Y+H[5], w=H[6]*X+H[7]*Y+H[8];
+  return [u/w,v/w];
+}
+function smooth(prev,next,alpha){ return !prev ? next : [prev[0]*(1-alpha)+next[0]*alpha, prev[1]*(1-alpha)+next[1]*alpha]; }
 
 /* detection normalization */
 function normalizeDetections(d){
@@ -242,19 +247,16 @@ const centerOf = corners => {
 
 /* ------------ init ------------ */
 function updateStats(n){ statsEl.textContent = `${n} tag${n===1?'':'s'}`; }
-function logError(e){ const m=(e && (e.stack||e.message)) || String(e); msgEl.textContent=m; console.error(e); }
 
 async function init(){
   cfg = await loadJSON(CFG_URL);
 
-  // allow JSON to define smoothing + offsets/scales
   if (cfg.calibration && Number.isFinite(cfg.calibration.smooth_alpha)) {
     SMOOTH_ALPHA = cfg.calibration.smooth_alpha;
   }
 
-  // ensure at least one demo pin
   if (!cfg.hotspots || !cfg.hotspots.length) {
-    cfg.hotspots = [{ xy_mm: [cfg.map_size_mm[0]/2, cfg.map_size_mm[1]/2], z_mm: 0, label: 'Map center' }];
+    cfg.hotspots = [{ xy_mm: [cfg.map_size_mm[0]/2, -cfg.map_size_mm[1]/2], z_mm: 0, label: 'Map center' }];
   }
 
   // preload images
@@ -347,8 +349,6 @@ async function init(){
   });
 
   setupCalibrationControls();  // interactive, outside HUD
-
-  msgEl.textContent='Aim so 3–4 tags are visible';
   requestAnimationFrame(loop);
 }
 
@@ -435,10 +435,10 @@ function debugMapCorners() {
   if (debugLogged || !(cfg?.calibration?.debug)) return;
   debugLogged = true;
   const corners = [
-    [0, 0],                      // bottom-left
-    [cfg.map_size_mm[0], 0],     // bottom-right
+    [0, 0],                                // bottom-left
+    [cfg.map_size_mm[0], 0],               // bottom-right
     [cfg.map_size_mm[0], -cfg.map_size_mm[1]], // top-right
-    [0, -cfg.map_size_mm[1]]     // top-left
+    [0, -cfg.map_size_mm[1]]               // top-left
   ];
   console.log('=== Map Corner Projections (neg Y up) ===');
   corners.forEach((c, i) => {
@@ -459,12 +459,16 @@ async function loop(){
     gatherCenters(dets, sx, sy);
     if (tagWorld.length >= K_MIN_CENTERS) {
       H = computeHomography(tagWorld, tagImage);
+      if (!Number.isFinite(H[0]) || !Number.isFinite(H[8])) H = null;
       if (H) debugMapCorners();
     } else {
       gatherOneTagCorners(dets, sx, sy);
       if (tagWorld.length === 4) {
         H = computeHomography(tagWorld, tagImage);
+        if (!Number.isFinite(H[0]) || !Number.isFinite(H[8])) H = null;
         if (H) debugMapCorners();
+      } else {
+        H = null;
       }
     }
 
@@ -476,7 +480,11 @@ async function loop(){
       msgEl.textContent = 'Move closer until 3–4 tags are visible';
       updateStats(normalizeDetections(dets).length);
     }
-  } catch(e){ const m=(e && (e.stack||e.message))||String(e); msgEl.textContent=m; console.error(e); }
+  } catch(e){
+    const m=(e && (e.stack||e.message)) || String(e);
+    msgEl.textContent=m;
+    console.error(e);
+  }
   requestAnimationFrame(loop);
 }
 
