@@ -4,9 +4,14 @@
   "map_size_mm": [435, 432],
   "map_offset_in_panel_mm": [26, 86],
   "apriltags": [
-    { "id": 101, "center_xy_mm": [50, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
-    { "id": 102, "center_xy_mm": [130, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
-    { "id": 103, "center_xy_mm": [210, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] }
+    { "id": 101, "center_xy_mm": [57.4, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
+    { "id": 102, "center_xy_mm": [137.4, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
+    { "id": 103, "center_xy_mm": [217.4, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
+    { "id": 104, "center_xy_mm": [297.4, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
+    { "id": 105, "center_xy_mm": [377.4, -20], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
+    { "id": 106, "center_xy_mm": [337.4, -60], "size_mm": 23.5, "rpy_deg": [0, 0, 0] },
+    { "id": 175, "center_xy_mm": [97.4, -60], "size_mm": 23.5, "rpy_deg": [0, 0, 0] }
+ 
   ],
   "hotspots": [
     { "xy_mm": [296, -171], "z_mm": 0, "label": "Bonanza", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/bonanza.jpg" },
