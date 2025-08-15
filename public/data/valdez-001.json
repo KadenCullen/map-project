@@ -23,6 +23,11 @@
     { "xy_mm": [167, -216], "z_mm": 0, "label": "Hidden Valley", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/hiddenvalley.jpg" },
     { "xy_mm": [274, -141], "z_mm": 0, "label": "Jumbo Ice Caves", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/icecaves.jpg" },
     { "xy_mm": [305, -120], "z_mm": 0, "label": "Porphyry", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/porphry.jpg" },
-    { "xy_mm": [350, -83], "z_mm": 0, "label": "Sourdough", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/sourdough.jpg" }
+    { "xy_mm": [350, -83], "z_mm": 0, "label": "Sourdough", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/sourdough.jpg" },
+    { "xy_mm": [10, -10], "z_mm": 0, "label": "Bottom-Left Corner", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/test.jpg" },
+    { "xy_mm": [425, -10], "z_mm": 0, "label": "Bottom-Right Corner", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/test.jpg" },
+    { "xy_mm": [425, -422], "z_mm": 0, "label": "Top-Right Corner", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/test.jpg" },
+    { "xy_mm": [10, -422], "z_mm": 0, "label": "Top-Left Corner", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/test.jpg" }
+
   ]
 }
