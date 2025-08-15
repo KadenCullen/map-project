@@ -87,16 +87,9 @@
 
 <script type="module">
 /* ------------ errors ------------ */
-addEventListener('error', e => {
-  const n = document.getElementById('msg');
-  if (n) n.textContent = 'Tracking error — see console for details.';
-  console.error('Unhandled error:', e.error || e);
-});
-addEventListener('unhandledrejection', e => {
-  const n = document.getElementById('msg');
-  if (n) n.textContent = 'Tracking promise error — see console for details.';
-  console.error('Unhandled promise rejection:', e.reason);
-});
+addEventListener('error', e => { const m=`JS error: ${e.message}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
+addEventListener('unhandledrejection', e => { const m=`Promise error: ${e.reason?.message ?? e.reason}`; const n=document.getElementById('msg'); if(n) n.textContent=m; console.error(e); });
+
 /* ------------ config / paths ------------ */
 const params = new URLSearchParams(location.search);
 const id = params.get('id') || 'valdez-001';
@@ -154,75 +147,57 @@ async function loadAprilTag(){
   return detector;
 }
 function computeHomography(world, image){
-  // world: [[X,Y],...], image: [[u,v],...], N>=4, using linear DLT + normal eq + Cholesky
-  const npts = world.length;
-  if (npts < 4) return null;
-
-  const A = new Float64Array(npts * 2 * 8);
-  const b = new Float64Array(npts * 2);
-  let r = 0;
-  for (let i = 0; i < npts; i++) {
-    const X = world[i][0], Y = world[i][1];
-    const u = image[i][0], v = image[i][1];
-
-    // row for u
-    A[r*8 + 0] = X; A[r*8 + 1] = Y; A[r*8 + 2] = 1;
-    A[r*8 + 3] = 0; A[r*8 + 4] = 0; A[r*8 + 5] = 0;
-    A[r*8 + 6] = -u*X; A[r*8 + 7] = -u*Y;
-    b[r] = u; r++;
-
-    // row for v
-    A[r*8 + 0] = 0; A[r*8 + 1] = 0; A[r*8 + 2] = 0;
-    A[r*8 + 3] = X; A[r*8 + 4] = Y; A[r*8 + 5] = 1;
-    A[r*8 + 6] = -v*X; A[r*8 + 7] = -v*Y;
-    b[r] = v; r++;
+  const A = [], b = [];
+  for (let i = 0; i < world.length; i++){
+    const [X, Y] = world[i], [u, v] = image[i];
+    A.push([X, Y, 1, 0, 0, 0, -u*X, -u*Y]); b.push(u);
+    A.push([0, 0, 0, X, Y, 1, -v*X, -v*Y]); b.push(v);
   }
+  const n = 8, m = A.length;
+  const AtA = Array.from({length:n}, () => new Float64Array(n));
+  const Atb = new Float64Array(n);
 
-  // Build normal equations
-  const N = 8;
-  const AtA = Array.from({length:N}, () => new Float64Array(N).fill(0));
-  const Atb = new Float64Array(N).fill(0);
-  for (let rr = 0; rr < r; rr++) {
-    for (let i = 0; i < N; i++) {
-      const Ai = A[rr*8 + i];
-      Atb[i] += Ai * b[rr];
-      for (let j = 0; j < N; j++) {
-        AtA[i][j] += Ai * A[rr*8 + j];
-      }
+  for (let r = 0; r < m; r++){
+    const R = A[r], br = b[r];
+    for (let i = 0; i < n; i++){
+      Atb[i] += R[i] * br;
+      for (let j = 0; j < n; j++) AtA[i][j] += R[i] * R[j];
     }
   }
 
-  // Cholesky solve (fixed inner loop)
-  function cholSolve(A, b){
-    const n = A.length;
-    const L = Array.from({length:n}, () => new Float64Array(n).fill(0));
+  function chol(AtA, Atb){
+    const n = AtA.length;
+    const L = Array.from({length:n}, () => new Float64Array(n));
+
+    // Cholesky factorization
     for (let i = 0; i < n; i++){
       for (let j = 0; j <= i; j++){
-        let s = A[i][j];
-        for (let k = 0; k < j; k++) s -= L[i][k]*L[j][k];
-        L[i][j] = (i === j) ? Math.sqrt(Math.max(s, 1e-12)) : (s / L[j][j]);
+        let s = AtA[i][j];
+        for (let k = 0; k < j; k++) s -= L[i][k] * L[j][k];
+        L[i][j] = (i === j) ? Math.sqrt(Math.max(s, 1e-12)) : s / L[j][j];
       }
     }
+
+    // Forward substitution Ly = Atb
     const y = new Float64Array(n);
     for (let i = 0; i < n; i++){
-      let s = b[i];
-      for (let k = 0; k < i; k++) s -= L[i][k]*y[k];
+      let s = Atb[i];
+      for (let k = 0; k < i; k++) s -= L[i][k] * y[k];
       y[i] = s / L[i][i];
     }
+
+    // Back substitution Lᵀx = y
     const x = new Float64Array(n);
-    for (let i = n-1; i >= 0; i--){
+    for (let i = n - 1; i >= 0; i--){
       let s = y[i];
-      for (let k = i+1; k < n; k++) s -= L[k][i]*x[k];
+      for (let k = i + 1; k < n; k++) s -= L[k][i] * x[k];
       x[i] = s / L[i][i];
     }
     return x;
   }
 
-  const h = cholSolve(AtA, Atb);
-  if (!h || !isFinite(h[0])) return null; // degenerate
-
-  // Return 3x3 with h[8]=1
-  return new Float64Array([h[0],h[1],h[2],  h[3],h[4],h[5],  h[6],h[7], 1]);
+  const h = chol(AtA, Atb);
+  return new Float64Array([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1]);
 }
 
 /* detection normalization */
