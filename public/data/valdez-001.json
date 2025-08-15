@@ -27,7 +27,12 @@
     { "xy_mm": [10, -10], "z_mm": 0, "label": "Bottom-Left Corner", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/test.jpg" },
     { "xy_mm": [425, -10], "z_mm": 0, "label": "Bottom-Right Corner", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/test.jpg" },
     { "xy_mm": [425, -422], "z_mm": 0, "label": "Top-Right Corner", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/test.jpg" },
-    { "xy_mm": [10, -422], "z_mm": 0, "label": "Top-Left Corner", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/test.jpg" }
-
+    { "xy_mm": [10, -422], "z_mm": 0, "label": "Top-Left Corner", "img": "https://github.com/KadenCullen/map-project/releases/download/v1.0.2/test.jpg" },
+  
+  "calibration": {
+    "offset_mm": [ 0, -35 ],   // shifts all pins (try Y=-35 if pins sit ~35mm too high)
+    "scale_mm":  [ 1.00, 1.05 ], // gentle Y scale if top/bottom drift (1.00–1.10 range)
+    "smooth_alpha": 0.05,      // 0.01–0.10; lower = steadier, slower
+    "debug": true              // shows projected map corners in px
   ]
 }
